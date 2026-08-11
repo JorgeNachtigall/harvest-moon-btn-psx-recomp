@@ -1,0 +1,16 @@
+{
+  "schema": "psxrecomp pointer-table seeds",
+  "source": "data-region scan of SLUS_011.15 text image (0x80048B08-0x8005E378)",
+  "note": "Function-pointer table entries whose targets are not reachable by direct JAL and were not identified as functions by Ghidra's prologue heuristics. Every target below is immediately preceded by 'jr $ra' (0x03E00008), i.e. it is the first instruction after a returning function. These are leaf functions with no stack-frame prologue, reached only indirectly.",
+  "verification": "target[-8] == 0x03E00008 for all entries; all targets 4-byte aligned and inside the code range 0x80011270-0x80048B08",
+  "seeds": [
+    {"address": "0x8002437C", "rationale": "pointer-table target from 0x800559C4 (4-entry dispatch table)"},
+    {"address": "0x80024408", "rationale": "pointer-table target from 0x800559C8 (4-entry dispatch table)"},
+    {"address": "0x80024578", "rationale": "pointer-table target from 0x800559CC (4-entry dispatch table)"},
+    {"address": "0x800245C8", "rationale": "pointer-table target from 0x800559D0 (4-entry dispatch table)"},
+    {"address": "0x8003D078", "rationale": "pointer-table target from 0x8005DCF4; body is 'jr $ra; nop' (empty handler slot)"},
+    {"address": "0x80044DA4", "rationale": "pointer-table target from 0x8005E12C"},
+    {"address": "0x80044DE4", "rationale": "pointer-table target from 0x8005E13C"},
+    {"address": "0x80048278", "rationale": "pointer-table target from 0x8005E258"}
+  ]
+}

@@ -1,0 +1,48 @@
+# Harvest Moon: Back to Nature (USA) — SLUS-01115
+#
+# All paths are relative to this repository's root (the recompiler walks up
+# from this file to the first directory containing .git/.gitignore/CMakeLists.txt).
+#
+# The [game] header values were read out of the PS-X EXE header and confirmed
+# against the entry-point BSS-clear loop (zeroes 0x8005E378..0x800B7E20),
+# disassembled and verified in Ghidra.
+
+[game]
+name         = "Harvest Moon: Back to Nature"
+id           = "SLUS-01115"
+region       = "NTSC-U"
+exe          = "SLUS_011.15"
+disc         = "Harvest Moon - Back to Nature (USA).cue"
+load_address = "0x80010000"
+entry_pc     = "0x80011278"
+text_size    = "0x0004E800"
+stack_base   = "0x801FFFF0"
+
+[recompiler]
+# 946 Ghidra function starts + 8 pointer-table targets recovered by scanning the
+# data region; see seeds/pointer_table_seeds.json for the evidence behind each.
+seeds       = "seeds/functions.txt"
+out_dir     = "generated"
+strict      = true
+discovery   = "whole-image"
+
+# Address model the game codegen folds BIOS RAM aliases through. OpenBIOS is
+# the backend this project builds; the retail SCPH1001 profile points at a ROM
+# most people will not have.
+#
+# NOTE: the overlay compile path currently IGNORES this key — bios_profile_path
+# is populated only from --config, while tools/compile_overlays.py invokes the
+# recompiler with --ws-config. It falls back to searching for
+# <subdir>/bios/SCPH1001.toml relative to this file's directory, which resolves
+# to psxrecomp/bios/SCPH1001.toml in this layout. That is why the framework must
+# live at ./psxrecomp and not somewhere else.
+bios_config = "psxrecomp/bios/OpenBIOS.toml"
+
+[runtime]
+# Load precompiled overlay shared objects from cache/<game_id>/ ahead of the
+# dirty-RAM interpreter, and record overlay bytes to overlay_captures.json.
+overlay_cache = true
+
+# Append every changed coherent snapshot to overlay_captures.addendum.jsonl so
+# a hard kill cannot destroy earlier records.
+overlay_capture_history = true

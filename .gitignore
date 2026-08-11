@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# Copyrighted game data. You supply these from your own legally-obtained disc;
+# they are never distributed with this repository.
+# ---------------------------------------------------------------------------
+*.bin
+*.cue
+*.img
+*.iso
+*.chd
+SLUS_011.15
+SLUS_011.15.text.bin
+
+# Recompiled game C is derived from the copyrighted executable — build output,
+# never tracked. Regenerate with tools/regen.sh.
+generated/
+
+# Compiled overlay shared objects are likewise derived from game code.
+cache/
+
+# Overlay captures contain verbatim game code bytes.
+overlay_captures.json
+overlay_captures.addendum.jsonl
+overlay_captures.json.d/
+
+# Build trees
+build/
+
+# Runtime state
+*.mcr
+*.mcd
+saves/
+settings.toml
+disc.cfg
+bios.cfg
+psx_screenshot*.png
+
+# macOS
+.DS_Store
