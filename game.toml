@@ -37,7 +37,6 @@ discovery   = "whole-image"
 # to psxrecomp/bios/SCPH1001.toml in this layout. That is why the framework must
 # live at ./psxrecomp and not somewhere else.
 bios_config = "psxrecomp/bios/OpenBIOS.toml"
-
 [runtime]
 # Load precompiled overlay shared objects from cache/<game_id>/ ahead of the
 # dirty-RAM interpreter, and record overlay bytes to overlay_captures.json.
@@ -46,3 +45,49 @@ overlay_cache = true
 # Append every changed coherent snapshot to overlay_captures.addendum.jsonl so
 # a hard kill cannot destroy earlier records.
 overlay_capture_history = true
+
+[video]
+# Native widescreen. The runtime renders a genuinely wider internal frame
+# (426x240 at 16:9) rather than squashing and stretching a 4:3 one -- the extra
+# horizontal field of view is real rendered pixels. Verified: 426x240 present,
+# correct proportions, ~60 fps.
+aspect_ratio = "16:9"
+
+[widescreen]
+# REQUIRED, and the single key that makes any of this take effect. The wide
+# compositor only engages on frames classified as gameplay; without a
+# classifier every frame is treated as full-2D and pillarboxed back to 4:3.
+# Before this was set, gpu_state reported mode 2 selected but game_mode 0 /
+# present_native_43 1 -- i.e. widescreen configured and doing nothing.
+# Harvest Moon projects real geometry through the GTE (~2900 verts/frame), so
+# the generic GTE-activity classifier applies.
+gte_game_mode = true
+
+[widescreen.cull]
+# The CUTSCENE world renderer's screen-space triangle cull. Verified by tracing
+# writes to the packet buffer during a cutscene: FUN_8001C37C (0x8001C37C)
+# builds the packets and, after RTPT + NCLIP backface rejection, calls
+# FUN_8001D21C with the three projected screen coords, drawing only when it
+# returns non-zero (call sites 0x8001C4B4/C638/C7CC/C964).
+#
+# That test hardcodes the 4:3 width. Per vertex it computes (X + 0x13) & 0xFFFF:
+#   sltiu ..., 0x1A3   early-out: reject when all three are beyond ~x=400
+#   sltiu ..., 0x153   keep when any vertex has x < 320   (0x153 = 320 + 0x13)
+# Forcing the first comparison of each chain to 1 makes it always report "on
+# screen". Guarded twice over: the recompiler verifies the instruction word at
+# each address and fails closed on mismatch, and the widened verdict applies
+# only while a wide view is engaged, so 4:3 behaviour is unchanged.
+#
+# MEASURED EFFECT: small on the cutscene farm (right-margin black 0.493 ->
+# 0.481). Larger where a scene has geometry authored beyond the 4:3 frame.
+# This does NOT affect gameplay terrain -- see docs/SESSION-03.md, the gameplay
+# ground is drawn by a different, still-unidentified builder.
+[[widescreen.cull.keep]]
+address  = "0x8001D230"   # sltiu v0,v0,0x1A3 -- skip the all-three-off-screen early-out
+expected = "0x2C4201A3"
+result   = 1
+
+[[widescreen.cull.keep]]
+address  = "0x8001D290"   # sltiu v0,v0,0x153 -- report the first vertex as on-screen
+expected = "0x2C420153"
+result   = 1
