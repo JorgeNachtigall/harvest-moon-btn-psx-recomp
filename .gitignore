@@ -35,6 +35,13 @@ disc.cfg
 bios.cfg
 psx_screenshot*.png
 
+# tools/extract_overlays.py imports extract_psx_exe as a module
+__pycache__/
+
+# Packaged .app bundles embed your disc image. Personal backups of your own
+# disc for your own machines — never redistributed, never tracked.
+dist/
+
 # macOS
 .DS_Store
 psx_last_run_report.json

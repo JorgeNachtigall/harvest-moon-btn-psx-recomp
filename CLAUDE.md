@@ -83,7 +83,67 @@ sh run.sh            # launch; no --disc needed, it resolves from game.toml
 Build type matters: **RelWithDebInfo** keeps the TCP debug server compiled in.
 Release strips it. Never build the generated C at `-O0`.
 
-### Overlay loop (manual on macOS — in-session autocompile is Windows-only)
+### Overlays — static extraction (the default path)
+
+```sh
+sh tools/regen.sh                     # also writes build/overlay_static.json
+sh tools/compile_static_overlays.sh   # compiles it, saves to cache/, restart
+```
+
+Overlays come off the disc at build time, not out of live RAM. `seeds/overlays.json`
+holds the map (13 members, 848 KB, two windows); `tools/extract_overlays.py`
+joins it to the user's disc and emits a captures-format file that the
+framework's `compile_overlays.py` consumes unchanged — no framework changes.
+
+**Verified facts about the overlay system — do not re-derive:**
+
+| | |
+|---|---|
+| Archive | `A_FILE.BIN` (LBA 182, 133,935,104 B), indexed by `A_FILE.HDT` (132 B) |
+| Index format | 33 LE u32 byte offsets; member *i* = `HDT[i]..HDT[i+1]`; `HDT[32]` = total size |
+| Record table | `0x80048B40`, 33 × `0x28`, field 0 = HDT offset, field 2.. = ASCII path |
+| Loader | `FUN_800147bc` (init), `FUN_800145f0(start, end, dest, dest)` (load) |
+| LBA math | `(table[start] >> 11) + base_lba`, base from `CdSearchFile` in `0x8005E430` |
+| Window A | `0x800B7E20`, constant at `0x80010098` — immediately after BSS |
+| Window B | `0x8012DDE8`, constant at `0x8001009C` |
+| Mode switch | `FUN_80011370`, `switch (0x8005E39C)`; entry point stored to `0x8005E384` |
+| Relocation | **none** — disc bytes are the pristine loaded image (member 11 verified byte-identical to RAM across its whole code region) |
+
+Members `MG1`–`MG5` are the five festival minigames, mutually exclusive in
+window A — invisible to capture-driven workflows unless every festival is played.
+
+### Packaging a macOS .app
+
+```sh
+sh tools/regen.sh && sh tools/bake_overlays.sh && \
+sh tools/compile_static_overlays.sh && sh build.sh && sh tools/make_app.sh
+```
+
+Produces `dist/<name>.app` (~266 MB), self-contained — the binary links only
+system frameworks. `dist/` is gitignored: the bundle embeds the disc image and
+is a personal backup, never distributed.
+
+**Path rules that are easy to get wrong, both verified the hard way:**
+
+| Asset | Resolved relative to | Must live in |
+|---|---|---|
+| `bios/`, `mods/`, `cache/` | the **executable** | `Contents/MacOS/` |
+| `disc`, `exe` in `game.toml` | **`game.toml`'s own directory** (`config_loader.cpp:1104` makes them absolute at load) | `Contents/Resources/`, as bare filenames |
+
+A `../Resources/` prefix on `disc` looks right and fails — it resolves to
+`Resources/../Resources/`, which does not validate.
+
+The bundle executable is a launcher script, because the runtime has no `~` or
+env expansion for `memcard_dir`. It redirects saves (`--memcard-dir`) and the
+overlay capture store (`PSX_OVERLAY_CAPTURES`, honored at `main.cpp:2338`) to
+`~/Library/Application Support/Harvest Moon BTN`.
+
+**Install somewhere writable.** `mod_runtime_initialize` hardcodes
+`exe_dir/mods` (`main.cpp:6030`) and creates it at startup; a read-only install
+dies with `cannot create mods directory`. `/Applications` and `~/Applications`
+are both fine.
+
+### Capture-driven fallback (manual on macOS — in-session autocompile is Windows-only)
 
 ```sh
 # 1. play into the area you want covered, then:
@@ -123,6 +183,16 @@ MCP server `ghidra-psx` (bethington/ghidra-mcp v6.0.0) gives live
 open with the program loaded. **Do not use LaurieWired/GhidraMCP** — its latest
 release declares `ghidraVersion=11.3.2` and will not load on Ghidra 12.x.
 
+The plugin's HTTP bridge listens on **port 8089**, and works even when the MCP
+tools are not registered in the session — which they often aren't. Drive it
+directly:
+
+```sh
+curl -s "http://127.0.0.1:8089/check_connection"
+curl -s "http://127.0.0.1:8089/decompile_function_by_address?address=0x80011370"
+curl -s "http://127.0.0.1:8089/get_xrefs_to?address=0x80048b40&limit=25"
+```
+
 Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock):
 
 ```sh
@@ -140,8 +210,10 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 | Boots to title, reaches gameplay, audio works | yes |
 | `dispatch_stats.miss_total` | **0** across a full play session |
 | `dirty_ram_stats.aborts` | **0** |
-| Overlay shards compiled | 4; `invalidations` 0, `stale_blocked` 0 |
-| Interpreted instructions @ frame 5120 | 53.2M → **2.85M** after overlay compilation |
+| Overlay coverage | **static, complete** — 13 members / 848 KB extracted from disc |
+| Overlay shards compiled | **35**; `invalidations` 0, `stale_blocked` 0 |
+| Overlay funcs registered / regions | 51 / 5 |
+| `dispatch_interp_fallback` at title | 75,160 → **615** after static extraction |
 | MDEC / FMV | **completely untested** — `mdec_decode_count` has never left 0 |
 | Beetle oracle | cloned at pinned `5759277b` in the framework tree, **not built** |
 
@@ -169,17 +241,22 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 
 ## 6. Next threads
 
-1. **Static overlay extraction (highest value).** Today overlay code is captured
-   from live RAM, so coverage depends on where the player walked and every user
-   must repeat it. If Harvest Moon has a readable overlay table (disc LBA → RAM
-   address → size), that table could live in this repo as small factual metadata
-   — like `seeds/` — and `regen.sh` would extract and compile **every** overlay
-   from the user's own disc at build time. `GAME_OVERLAY_STATIC_C`
-   (`psxrecomp/runtime/runtime.cmake:481`) already bakes overlay C into the
-   binary. Result: 100% coverage on first build, no captures, no dumps, fully
-   reproducible from disc + config. Start by tracing who writes into
-   `0x800B7000` (`wtrace_range`) and decompiling that loader.
-   Framework design notes: `psxrecomp/docs/AOT_OVERLAY_PLAN.md`.
+1. ~~**Static overlay extraction.**~~ **Done** — see §3 and `docs/SESSION-02.md`.
+   Follow-ups it left open:
+   - **Mode 15 loads member 11 into window B**, unlike every other reference to
+     it, and records no entry point. Marked `unverified` in `seeds/overlays.json`
+     and extracted anyway; it compiles to an empty shard, which is the framework
+     correctly rejecting it. Decompile the mode-15 path to settle whether it
+     relocates the member or is a game bug.
+   - **Window B's extent is unknown** — only its base (`0x8012DDE8`) is proven.
+   - ~~**`GAME_OVERLAY_STATIC_C`**~~ **Done** — `tools/bake_overlays.sh`. It does
+     **not** remove the `cache/` round trip, though: shards also cover kernel
+     regions (`0x00000000`, `0x0000D000`) that are not disc overlays and cannot
+     be statically extracted. Baked-only measured 992K interpreter fallbacks at
+     the title screen vs 5K with the cache present. Baking those kernel captures
+     into the same `overlays_static.c` would finish the job.
+   - Whether static extraction makes the capture path redundant enough to stop
+     recording `overlay_captures.json` at runtime (`game.toml:44`).
 2. **Build the Beetle oracle** — needed before any real divergence hunt.
    Patch with the three hooks in `psxrecomp/docs/beetle_*.patch`, build static,
    then compare port 4370 (ours) against 4380 (Beetle).

@@ -50,4 +50,23 @@ fi
 echo "==> recompiling SLUS_011.15"
 "$FRAMEWORK/recompiler/build/psxrecomp-game" --config "$ROOT/game.toml"
 
+# Overlays: the game streams ~848 KB of code out of A_FILE.BIN into two fixed
+# RAM windows. seeds/overlays.json says which archive members those are and
+# where they land; the bytes come from the user's own disc, here, at build
+# time. This is what makes overlay coverage a property of the disc rather than
+# of how far the player happened to walk before dumping RAM.
+if [ -f "$ROOT/seeds/overlays.json" ]; then
+    IMG=${IMG:-$(ls "$ROOT"/*.bin "$ROOT"/*.iso "$ROOT"/*.img 2>/dev/null | head -1 || true)}
+    if [ -z "$IMG" ]; then
+        echo "warning: no disc image found -- skipping overlay extraction." >&2
+        echo "         Overlays will run interpreted (correct, just slower)." >&2
+    else
+        echo "==> extracting overlays from $(basename "$IMG")"
+        mkdir -p "$ROOT/build"
+        python3 "$ROOT/tools/extract_overlays.py" \
+            "$IMG" "$EXE" "$ROOT/seeds/overlays.json" "$ROOT/build/overlay_static.json"
+        echo "    compile them with:  sh tools/compile_static_overlays.sh"
+    fi
+fi
+
 echo "==> done. Next: sh build.sh"
