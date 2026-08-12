@@ -30,9 +30,24 @@ if(NOT GAME_FULL)
     "tracked in this repository.")
 endif()
 
+# Overlays baked into the executable, if tools/bake_overlays.sh has produced
+# them. This is optional: without it the runtime still loads overlay shards
+# from cache/ at launch, which is the same code by a different route. Baked in
+# is what tools/make_app.sh wants — a single self-contained binary with no
+# cache directory to carry alongside it.
+set(GAME_OVERLAY_STATIC "${CMAKE_CURRENT_SOURCE_DIR}/generated/overlays_static.c")
+if(EXISTS "${GAME_OVERLAY_STATIC}")
+  message(STATUS "overlays: baking ${GAME_OVERLAY_STATIC} into the executable")
+else()
+  message(STATUS "overlays: none baked — the runtime will load shards from cache/ "
+                 "(run tools/bake_overlays.sh to bake them in)")
+  set(GAME_OVERLAY_STATIC "")
+endif()
+
 psxrecomp_add_runtime_target(psx-runtime
   GAME_GENERATED_FULL_C     "${GAME_FULL}"
   GAME_GENERATED_DISPATCH_C "${GAME_DISPATCH}"
+  GAME_OVERLAY_STATIC_C     "${GAME_OVERLAY_STATIC}"
   WINDOW_TITLE              "Harvest Moon: Back to Nature (Recompiled)"
   DEFAULT_GAME_CONFIG_PATH  "game.toml"
 )
