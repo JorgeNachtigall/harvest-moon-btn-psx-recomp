@@ -107,10 +107,20 @@ python3 psxrecomp/tools/compile_overlays.py \
   --runtime-include psxrecomp/runtime/include \
   --out-dir build/cache --jobs 8
 
-# 3. restart — shards go native on the next launch, never mid-session
+# 3. persist the new shards out of the disposable build tree
+sh tools/save_cache.sh
+
+# 4. restart — shards go native on the next launch, never mid-session
 ```
 
 Captures are additive, so coverage accumulates across sessions.
+
+**Two directories, deliberately.** `cache/` at the repo root is the durable
+store; `build/cache` is what the runtime actually reads. `build.sh` copies
+root → build on the way in, and `tools/save_cache.sh` copies build → root on the
+way out. Skipping step 3 means `rm -rf build/` silently discards every overlay
+you compiled. Older capture files can be archived under `captures/` and fed back
+in with `--captures captures/<file>` after a codegen change.
 
 ## Known issues
 
