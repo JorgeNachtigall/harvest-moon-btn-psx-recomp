@@ -172,6 +172,41 @@ sh tools/save_cache.sh
 `screenshot <path>` (**positional path** — `path=` is taken literally and
 creates a file named `path=...`).
 
+### Reverse engineering the game's rendering
+
+Two documents carry everything learned so far. **Read them before touching any
+draw path** — they encode several days of dead ends.
+
+- **`docs/RENDERING.md`** — the game's draw paths: which function draws the
+  ground, the sprites, the menu wallpaper; the two screen-bounds culls in the
+  3D renderer and their exact constants; the chunk frustum test; dead code to
+  avoid; packet double-buffering; GTE opcode reference.
+- **`docs/METHOD.md`** — how to find "which function drew this pixel" in three
+  steps, plus the measurement discipline. Use it first, not last.
+
+The short version of the method, because it is the highest-value thing here:
+
+```
+pixel -> which primitive covers it (rasterise a gpu_frame_dump)
+      -> its packet address (src)
+      -> who writes that address (wtrace on that exact range)
+      -> the writer's ra - 8 is the call site
+```
+
+Hard-won rules:
+
+- A packet buffer address does NOT identify its producer — the game
+  double-buffers, and the same range is written by different renderers in
+  gameplay vs cutscenes. Trace the specific packet.
+- A renderer may contain MORE THAN ONE cull. `FUN_8001C37C` has two bounds
+  helpers of different arity; patching one, seeing no change and concluding the
+  renderer was innocent was the single most expensive error in this project.
+  Enumerate every `jal` in the function first.
+- Scan instruction encodings, not just decompiler output. Ghidra had not
+  analysed the region holding one of the culls and reported "no function" there.
+- Measure with numbers (black fraction, per-column primitive coverage, primitive
+  count). Several plausible fixes changed the image by exactly zero pixels.
+
 ### Ghidra
 
 Project `~/ghidra-projects/HarvestMoonBTN`, program `SLUS_011.15.text.bin`
@@ -214,6 +249,7 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 | Overlay shards compiled | **35**; `invalidations` 0, `stale_blocked` 0 |
 | Overlay funcs registered / regions | 51 / 5 |
 | `dispatch_interp_fallback` at title | 75,160 → **615** after static extraction |
+| Native widescreen (16:9) | **working** — 426×240, real FOV, 0.000 black across the frame (branch `feat/native-widescreen`) |
 | MDEC / FMV | **completely untested** — `mdec_decode_count` has never left 0 |
 | Beetle oracle | cloned at pinned `5759277b` in the framework tree, **not built** |
 

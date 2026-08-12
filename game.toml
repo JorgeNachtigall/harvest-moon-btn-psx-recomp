@@ -129,7 +129,34 @@ aspect_ratio = "16:9"
 gte_game_mode = true
 
 [widescreen.cull]
-# The CUTSCENE world renderer's screen-space triangle cull. Verified by tracing
+# ---------------------------------------------------------------------------
+# The 3D world renderer's screen-space culls.  See docs/RENDERING.md §2 for the
+# full anatomy and docs/METHOD.md for how they were found.
+#
+# FUN_8001C37C draws the ground and world geometry. Per primitive it runs
+# RTPT -> GTE FLAG check -> NCLIP backface -> a SCREEN-BOUNDS TEST, and emits
+# only when that test returns non-zero.
+#
+# It has TWO bounds helpers, and both hardcode the 4:3 width:
+#
+#   FUN_8001D21C  3 vertices, called at 0x8001C4B4/C638/C7CC/C964
+#   FUN_8001D2D8  4 vertices, called at 0x8001CB54/CD2C/CF14/D100
+#
+# Both compute (X + 0x13) & 0xFFFF per vertex and keep the primitive when any
+# vertex is below 0x153 (= 320 + 0x13, the 4:3 display width). That is why
+# geometry pops into view exactly as it touches the original screen edge.
+#
+# Forcing the FIRST comparison of each chain to 1 makes the helper report
+# "on screen" immediately. Guarded twice over: the recompiler verifies each
+# instruction word and fails closed on a mismatch, and the widened verdict
+# applies only while a wide view is engaged, so 4:3 is byte-identical.
+#
+# Measured, savestate slot 1 at 16:9:
+#   before  left-margin black 0.075  right 0.273  whole frame 0.043
+#   after   left-margin black 0.002  right 0.000  whole frame 0.000
+# ---------------------------------------------------------------------------
+
+# --- FUN_8001D21C (3-vertex) --- Verified by tracing
 # writes to the packet buffer during a cutscene: FUN_8001C37C (0x8001C37C)
 # builds the packets and, after RTPT + NCLIP backface rejection, calls
 # FUN_8001D21C with the three projected screen coords, drawing only when it
@@ -143,10 +170,9 @@ gte_game_mode = true
 # each address and fails closed on mismatch, and the widened verdict applies
 # only while a wide view is engaged, so 4:3 behaviour is unchanged.
 #
-# MEASURED EFFECT: small on the cutscene farm (right-margin black 0.493 ->
-# 0.481). Larger where a scene has geometry authored beyond the 4:3 frame.
-# This does NOT affect gameplay terrain -- see docs/SESSION-03.md, the gameplay
-# ground is drawn by a different, still-unidentified builder.
+# On its own this moved the cutscene farm only slightly (right-margin black
+# 0.493 -> 0.481): the ground flows through the 4-vertex helper below, not this
+# one. Both are needed.
 [[widescreen.cull.keep]]
 address  = "0x8001D230"   # sltiu v0,v0,0x1A3 -- skip the all-three-off-screen early-out
 expected = "0x2C4201A3"
@@ -154,5 +180,23 @@ result   = 1
 
 [[widescreen.cull.keep]]
 address  = "0x8001D290"   # sltiu v0,v0,0x153 -- report the first vertex as on-screen
+expected = "0x2C420153"
+result   = 1
+
+# THE GAMEPLAY GROUND CULL. FUN_8001C37C has TWO screen-bounds helpers, not one:
+#   FUN_8001D21C (3-vertex) called at 0x8001C4B4/C638/C7CC/C964
+#   FUN_8001D2D8 (4-vertex) called at 0x8001CB54/CD2C/CF14/D100   <-- this one
+# Only the first was patched originally, which is why gameplay never changed.
+#
+# Found by working backwards from pixels: rasterising one frame identified the
+# primitive covering a known grass pixel (src 0x001C2B2C), and tracing writes to
+# that exact packet gave writer PCs 0x8001CE58/CF38/CFB4 with ra=0x8001CF1C --
+# the return address of the FUN_8001D2D8 call at 0x8001CF14.
+#
+# Same 4:3 hardcoding: per vertex (X + 0x13) & 0xFFFF < 0x153 (= 320 + 0x13).
+# It has no early-out, so forcing the first comparison to 1 returns "visible"
+# immediately. Gated: applies only while a wide view is engaged.
+[[widescreen.cull.keep]]
+address  = "0x8001D2E8"   # sltiu v0,v0,0x153 -- 4-vertex bounds test, first vertex
 expected = "0x2C420153"
 result   = 1
