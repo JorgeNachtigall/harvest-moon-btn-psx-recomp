@@ -37,3 +37,4 @@ psx_screenshot*.png
 
 # macOS
 .DS_Store
+psx_last_run_report.json
