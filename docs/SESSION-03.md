@@ -141,6 +141,46 @@ literally zero pixels, because the extra chunks were all off-screen.
 
 ## Open questions
 
+### The 4:3 bound is a literal constant -- and widening it works
+
+The decisive insight came from observing the game, not the code: **things pop
+into view the instant they touch the 4:3 edge**, which is visible directly
+because the OpenGL tint seam marks that boundary. That is the signature of a
+per-item test against the original 320-wide screen, not a frustum or a data
+limit.
+
+Acting on it produced the session's first real fix.
+
+**VERIFIED -- menu wallpaper.** `FUN_800223D4` (0x800223D4) draws the tiled
+menu background as a 24px grid, bounded to the original screen plus one tile:
+
+```
+s0 = -0xC                start X, one tile left of screen
+s0 += 0x18               24px step
+while (s0 < 0x158)       X bound = 344 = 320 + 24
+while (a1 < 0x108)       Y bound = 264 = 240 + 24
+```
+
+Three `[[recompiler.patch]]` entries widen it by three tiles each side
+(start -0xC -> -0x54, bound 0x158 -> 0x1A0). Confirmed in play: the wallpaper
+now fills the widened frame. First attempt, no iteration.
+
+This establishes the method for this game: find the constant encoding the 4:3
+bound, verify its instruction word, widen it, and let the recompiler fail
+closed on a mismatch.
+
+**UNVERIFIED -- per-object right-edge cull.** At 0x80018238 an object's X is
+loaded from `gp+0x228` and tested `slti v0,v0,0x141` (321 = 320+1); on failure
+the code branches past the draw. There is no matching left-edge test, which
+would neatly explain why the left margin has measured cleaner than the right
+all session (0.075 vs 0.273 black). Widened 321 -> 374; the patch is live in
+the generated C but produced no measurable change in the test scene, which has
+few discrete objects near the right edge. Retest where objects sit at the edge.
+
+Ghidra reports **no function** at 0x80018240 -- it never analysed that region,
+which is why decompiler-driven searching could not have found it. Scanning
+instruction encodings did.
+
 ### Which builder draws the gameplay ground?
 
 **Identified: `FUN_80016280`** (0x80016280), reached as
@@ -170,11 +210,31 @@ Call-chain facts:
 
 ### Is the framework's `bg2d` tile-layer widening applicable?
 
-**Unproven.** `[widescreen.bg2d]` widens a 2D scrolling tile layer by prepending
-and appending columns from an already-streamed ring, which sounds like the right
-shape for the gameplay ground. But it rests on the tile-ring premise above,
-which did not survive checking. Do not configure it until the real builder and
-its column-range logic are identified.
+**No, and this is now settled.** `bg2d` is a generic column-scroll widener that
+rewrites three specific instruction shapes:
+
+| site | expected opcode | meaning |
+|---|---|---|
+| `count_site` | `addiu`/`ori`, or `slti`/`sltiu` | literal column count / loop bound |
+| `startcol_site` | `andi` | start tile-column mask |
+| `startx_site` | `sra`, or `subu rd,zero,rt` | start screen X from scroll |
+
+That is the classic scrolling-background shape. Harvest Moon's ground emitter
+is not that shape: `FUN_80016280` loops on a count read from map data, with no
+column-count immediate, no `andi` start-column mask and no scroll-derived
+`sra`. There is nothing for `bg2d` to bind to.
+
+### Option A (synchronised capture) -- tried and failed
+
+`set_snapshot` + `read_frame_ram` does work: it returns coherent per-frame RAM
+snapshots, and scratchpad addresses are safe (an earlier crash was specific to
+`0x1F800300`). But snapshots are taken at a **fixed point each frame**, not
+synchronised to a function's execution, so by capture time the render call stack
+has unwound and been overwritten. Testing every RAM pointer across 384 bytes of
+captured stack yielded only two descriptor-shaped candidates (0 and 1 tiles),
+neither the ground. Without a capture point tied to the call -- which the debug
+server does not offer for native code, `pc_break` being DuckStation-only -- this
+approach cannot work.
 
 ### Savestates and the widescreen latch
 

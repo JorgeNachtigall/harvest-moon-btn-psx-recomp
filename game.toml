@@ -37,6 +37,71 @@ discovery   = "whole-image"
 # to psxrecomp/bios/SCPH1001.toml in this layout. That is why the framework must
 # live at ./psxrecomp and not somewhere else.
 bios_config = "psxrecomp/bios/OpenBIOS.toml"
+
+# ---------------------------------------------------------------------------
+# Widescreen: widen the MENU WALLPAPER tile-grid loop.  [VERIFIED WORKING]
+#
+# FUN_800223D4 (0x800223D4) draws the tiled menu/pause background as a grid of
+# 24px tiles via a
+# callback, bounded to the ORIGINAL 320x240 screen plus one tile of slack:
+#
+#   s0 = -0xC                     start X, one tile left of screen
+#   s0 += 0x18                    24px tile step
+#   while (s0 < 0x158)            X bound = 344 = 320 + 24
+#   while (a1 < 0x108)            Y bound = 264 = 240 + 24
+#
+# Confirmed in play: with these patches the wallpaper now fills the widened
+# frame instead of stopping at the 4:3 edge. (It is NOT the gameplay ground --
+# that is drawn elsewhere and was unaffected; gameplay primitive counts stayed
+# at ~291 and the margins did not change.)
+#
+# 16:9 at 320 wide reveals 53px per side; rounded up to whole 24px tiles that
+# is 72px = 3 tiles. So start 3 tiles earlier and end 3 tiles later.
+#
+# NOTE: not gated on a wide view -- at 4:3 this simply draws a few off-screen
+# tiles (wasted, harmless). Gate it before this goes anywhere that ships 4:3.
+# Per-object right-edge screen cull. At 0x80018238 the code loads an object's
+# X from gp+0x228 and does `slti v0,v0,0x141` (321 = 320+1); if X >= 321 it
+# branches past the draw. There is NO matching left-edge test, which is exactly
+# why the left margin has always measured far cleaner than the right
+# (0.075 vs 0.273 black). This is the cull that makes things pop into view the
+# instant they touch the 4:3 edge.
+#
+# 16:9 reveals 53px on the right, so widen the bound 321 -> 374.
+#
+# UNVERIFIED. The patch is live in the generated C, but produced no measurable
+# change in the test scene (right-margin black stayed 0.273). That scene is
+# almost entirely ground and path with few discrete objects near the right
+# edge, so this may be correct with nothing to act on -- or it may govern an
+# entity class that is not what we are chasing. Retest somewhere with objects
+# near the right edge before trusting it.
+[[recompiler.patch]]
+id          = "widescreen-object-right-edge-cull"
+address     = "0x80018240"
+expected    = "0x28420141"   # slti v0,v0,0x141  (321)
+replacement = "0x28420176"   # slti v0,v0,0x176  (374 = 321 + 53)
+note        = "Right-edge visibility cull: extend to the widescreen frame"
+
+[[recompiler.patch]]
+id          = "widescreen-ground-grid-start-x"
+address     = "0x80022468"
+expected    = "0x2410FFF4"   # addiu s0,zero,-0xC
+replacement = "0x2410FFAC"   # addiu s0,zero,-0x54
+note        = "Ground tile grid: begin 3 tiles left of the 4:3 edge"
+
+[[recompiler.patch]]
+id          = "widescreen-ground-grid-start-x-reset"
+address     = "0x800224BC"
+expected    = "0x2410FFF4"   # addiu s0,zero,-0xC  (per-row reset, delay slot)
+replacement = "0x2410FFAC"   # addiu s0,zero,-0x54
+note        = "Same start, reset at the top of each row"
+
+[[recompiler.patch]]
+id          = "widescreen-ground-grid-x-bound"
+address     = "0x800224A0"
+expected    = "0x2A020158"   # slti v0,s0,0x158  (344 = 320 + one tile)
+replacement = "0x2A0201A0"   # slti v0,s0,0x1A0  (416 = 344 + three tiles)
+note        = "Ground tile grid: end 3 tiles right of the 4:3 edge"
 [runtime]
 # Load precompiled overlay shared objects from cache/<game_id>/ ahead of the
 # dirty-RAM interpreter, and record overlay bytes to overlay_captures.json.
