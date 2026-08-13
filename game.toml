@@ -75,6 +75,43 @@ bios_config = "psxrecomp/bios/OpenBIOS.toml"
 # edge, so this may be correct with nothing to act on -- or it may govern an
 # entity class that is not what we are chasing. Retest somewhere with objects
 # near the right edge before trusting it.
+# ---------------------------------------------------------------------------
+# Chunk frustum: relax the HORIZONTAL planes only.  See docs/RENDERING.md §3.
+#
+# FUN_8001C1C0 rejects a chunk against four frustum half-planes, testing them in
+# memory order from 0x80061EA8 with `bltz` after each dot product:
+#
+#   0x8001C29C -> P0 = (-2434, -303, -3291)   large X/Z, tiny Y  -> HORIZONTAL
+#   0x8001C2DC -> P1 = ( 3289, -303,  2434)   large X/Z, tiny Y  -> HORIZONTAL
+#   0x8001C31C -> P2 = ( 1655, 3381, -1657)   large Y            -> vertical
+#   (return)      P3 = ( -947,-3890,   947)   large Y            -> vertical
+#
+# Widescreen widens horizontally only, so NOP the first two rejections and leave
+# the vertical/depth culling intact. The `addiu a2,a2,0x6` delay slots still
+# execute, so the plane pointer keeps advancing correctly.
+#
+# HISTORY: bypassing the whole test (returning "visible" for every chunk) gave a
+# perfectly clean frame -- 0.0000 black, 60 fps, but 2310 primitives/frame
+# against a baseline of 289. Outdoors that was fine; inside the farm, which has
+# far more objects, it ran very slowly and then CRASHED -- almost certainly the
+# 0x2000-word packet reservation in FUN_8001C37C overflowing. Relaxing only the
+# horizontal planes keeps vertical and depth rejection doing their work.
+#
+# NOT gated on a wide view. Gate before shipping 4:3.
+[[recompiler.patch]]
+id          = "widescreen-chunk-frustum-skip-left-plane"
+address     = "0x8001C29C"
+expected    = "0x04A00032"   # bltz a1,+0x32   (reject on plane P0)
+replacement = "0x00000000"   # nop
+note        = "Do not reject chunks on the left frustum plane"
+
+[[recompiler.patch]]
+id          = "widescreen-chunk-frustum-skip-right-plane"
+address     = "0x8001C2DC"
+expected    = "0x04A00022"   # bltz a1,+0x22   (reject on plane P1)
+replacement = "0x00000000"   # nop
+note        = "Do not reject chunks on the right frustum plane"
+
 [[recompiler.patch]]
 id          = "widescreen-object-right-edge-cull"
 address     = "0x80018240"

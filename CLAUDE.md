@@ -83,6 +83,28 @@ sh run.sh            # launch; no --disc needed, it resolves from game.toml
 Build type matters: **RelWithDebInfo** keeps the TCP debug server compiled in.
 Release strips it. Never build the generated C at `-O0`.
 
+> ### Editing `game.toml` silently invalidates the overlay cache
+>
+> The cache directory is named `cg<ver>_<emitter>_gc<CONFIG HASH>`, and that
+> config hash covers `[recompiler]` **and** `[widescreen]`. Change any of it and
+> the runtime looks for a directory that does not exist, finds no shards, and
+> runs all ~848 KB of overlay code in the MIPS interpreter. **There is no error
+> message.** The game stays correct and gets several times slower.
+>
+> After any `game.toml` edit:
+>
+> ```sh
+> sh tools/regen.sh && sh build.sh && sh tools/compile_static_overlays.sh
+> ```
+>
+> Confirm it took, via `overlay_loader_status`: `registered` should be ~942 and
+> `dispatch_native` must be non-zero. `dispatch_native: 0` with a large
+> `dispatch_interp_fallback` means the cache is orphaned.
+>
+> This cost an entire debugging session: six config edits in a row were measured
+> on interpreter-only builds, which produced a phantom "the farm is too heavy"
+> crash and a stream of meaningless performance numbers.
+
 ### Overlays — static extraction (the default path)
 
 ```sh
