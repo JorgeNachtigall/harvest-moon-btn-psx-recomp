@@ -159,10 +159,21 @@ Typical live values: `P0=(-2434,-303,-3291)`, `P1=(3289,-303,2434)`,
 across different areas and camera positions** — they are camera-relative
 constants, not per-map data.
 
-**Do not bother widening this.** Forcing it to report every chunk visible was
-tested: it submitted far more geometry (a visible frame-rate cost) and changed
-the rendered image by **zero pixels**, because the extra chunks were all
-off-screen. The screen-bounds culls in §2 are the real limiter.
+**Do not widen this.** Two variants were tried and both reverted:
+
+| variant | prims/frame | result |
+|---|---|---|
+| full bypass (always "visible") | 2310 (vs 289) | clean frame, but the farm ran slowly and **crashed** |
+| horizontal planes only (NOP `bltz` at `0x8001C29C`/`0x8001C2DC`) | 1664 | `total_ms_avg` unchanged, but `total_ms_max` 26 ms → **51 ms**; farm visibly dropped frames |
+
+Reverting took `total_ms_max` back to 16.674 ms against a 16.667 ms budget — no
+spikes at all. **Judge this by `total_ms_max`, not `total_ms_avg`**: the averages
+differed by 0.02 ms while the game stuttered badly.
+
+It is not worth it either way. The screen-bounds culls in §2 already take
+whole-frame black from 0.043 to **0.0003** at baseline performance; relaxing the
+frustum only closed that last 0.0003, and additionally revealed scenery the game
+deliberately culls.
 
 Note the rejections are `bltz` (REGIMM), so `[[widescreen.cull.keep]]` cannot
 reach them — that key only accepts `SLT`/`SLTU`/`SLTI`/`SLTIU`.

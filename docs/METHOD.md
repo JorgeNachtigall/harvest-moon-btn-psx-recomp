@@ -169,6 +169,7 @@ missed:
   acting on any theory.**
 - **primitive count per frame** — if a change was supposed to submit more
   geometry and the count didn't move, it didn't work
+- **frame cost by `total_ms_max`, NEVER `total_ms_avg`** — see below
 
 ### Use savestates to make scenes reproducible
 
@@ -216,6 +217,16 @@ identity gave `−45 px` — wrong in both magnitude and sign, because the conte
 perspective-projected and does not translate rigidly. A conclusion built on it
 had to be retracted. Derive shifts from packet data, and treat a high residual
 as a failed match rather than a fit.
+
+**Frame-time averages hide the thing the player feels.** A change that made the
+farm visibly stutter measured `total_ms_avg` 16.649 against a vanilla 16.665 --
+identical, so it was declared innocent. `total_ms_max` in the same samples read
+**51.4 ms against 26.4 ms**, and that was dismissed as a transient. It was not:
+reverting the change took max to 16.674 ms (i.e. no spikes at all) and the
+stutter vanished. Dropped frames are a TAIL phenomenon; most frames are fine and
+the occasional one takes three budgets. Judge by max or a high percentile, and
+when a user says "it still stutters" while your metric says otherwise, the
+metric is what needs re-examining.
 
 **Structure-shape scans over RAM are hopeless without strong constraints.**
 Scanning 2 MB for "five consecutive pointer-looking fields" returned 319
