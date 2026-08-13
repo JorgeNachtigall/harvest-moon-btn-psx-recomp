@@ -134,6 +134,27 @@ framework's `compile_overlays.py` consumes unchanged — no framework changes.
 Members `MG1`–`MG5` are the five festival minigames, mutually exclusive in
 window A — invisible to capture-driven workflows unless every festival is played.
 
+**Overlay function seeds — why coverage is now ~95% native.** Shards are
+compiled by walking outward from seeds. With only the mode-switch entry points
+and header pointer tables (a few hundred), everything reached through an
+indirect call was never discovered and ran on the MIPS interpreter: **85% of
+overlay dispatches**. `seeds/overlay_functions.json` adds **3279** function
+starts recovered by Ghidra auto-analysis of each member's raw image, imported at
+its real load address. Result:
+
+| | before | after |
+|---|---|---|
+| registered overlay funcs | 942 | **1399** |
+| `dispatch_native` | 113,817 | **1,599,432** |
+| `dispatch_interp_fallback` | 648,441 | **84,225** |
+| interpreted | 85% | **5%** |
+
+Addresses only, so it commits like `seeds/functions.txt`, and
+`tools/extract_overlays.py` consumes it automatically — **users never need
+Ghidra**. Regenerate it only if the seed map changes:
+`sh tools/overlay_seeds.sh` (Ghidra must be CLOSED), then
+`python3 tools/merge_overlay_seeds.py ...`.
+
 ### Packaging a macOS .app
 
 ```sh

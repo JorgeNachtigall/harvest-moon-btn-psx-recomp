@@ -20,6 +20,7 @@ Usage: extract_overlays.py <image.bin> <SLUS_011.15> <seeds/overlays.json> <out.
 """
 import base64
 import json
+import os
 import struct
 import sys
 
@@ -96,6 +97,22 @@ def main():
         seeds = json.load(fh)
     archive = seeds["archive"]
     windows = seeds["windows"]
+
+    # Ghidra-recovered function starts, keyed '<member index>@<load address>'.
+    # Optional: without it the shards compile from header pointers alone and
+    # most overlay code ends up on the MIPS interpreter (85% of dispatches
+    # measured). Committed as addresses, so users never need Ghidra.
+    fn_seeds = {}
+    fn_path = os.path.join(os.path.dirname(seeds_path), "overlay_functions.json")
+    if os.path.isfile(fn_path):
+        with open(fn_path) as fh:
+            for key, rec in json.load(fh).get("members", {}).items():
+                fn_seeds[key] = [int(a, 16) for a in rec.get("entries", [])]
+        print(f"function seeds: {sum(len(v) for v in fn_seeds.values())} "
+              f"addresses across {len(fn_seeds)} members ({fn_path})")
+    else:
+        print(f"warning: {fn_path} missing -- overlays will compile from header "
+              f"pointers only and most code will run interpreted.")
 
     exe = open(exe_path, "rb").read()
     check(exe[:8] == b"PS-X EXE", f"{exe_path} is not a PS-X EXE")
@@ -192,15 +209,19 @@ def main():
             "static_dispatch_entry_pcs": sorted(set(entries)),
             # Header pointers are candidates, not proofs: the table can point at
             # data as well as code. Left for the framework's callable-boundary
-            # gate to accept or reject.
-            "function_entry_pcs": sorted(set(pointers)),
+            # gate to accept or reject. Ghidra's recovered function starts are
+            # merged in here -- without them most overlay code has no compiled
+            # function and falls back to the MIPS interpreter.
+            "function_entry_pcs": sorted(
+                set(pointers) | set(fn_seeds.get(f"{idx}@0x{base:08X}", []))),
         })
         total += size
 
         flag = "  [unverified]" if member.get("unverified") else ""
+        nfn = len(captures[-1]["function_entry_pcs"])
         print(f"  [{idx:2d}] {names[idx]:<20s} 0x{offset:08X}  {size:>7d} B  "
               f"LBA {disc.lba_of(archive['data_file'], offset):>5d}  "
-              f"-> 0x{base:08X}  {len(pointers):>3d} ptrs, "
+              f"-> 0x{base:08X}  {nfn:>4d} fn seeds, "
               f"{len(entries)} entry{flag}")
 
     with open(out_path, "w") as fh:
