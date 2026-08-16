@@ -65,8 +65,32 @@ if [ -f "$ROOT/seeds/overlays.json" ]; then
         mkdir -p "$ROOT/build"
         python3 "$ROOT/tools/extract_overlays.py" \
             "$IMG" "$EXE" "$ROOT/seeds/overlays.json" "$ROOT/build/overlay_static.json"
-        echo "    compile them with:  sh tools/compile_static_overlays.sh"
     fi
 fi
 
-echo "==> done. Next: sh build.sh"
+# --- overlay cache staleness check -----------------------------------------
+# The overlay cache is keyed by a hash of [recompiler]/[widescreen] config, so
+# ANY game.toml edit silently orphans it: the runtime looks for a cache dir that
+# does not exist, finds nothing, and drops all ~848 KB of overlay code to the
+# MIPS interpreter. There is no error -- the game just runs several times
+# slower. This cost a whole debugging session before the cause was spotted, so
+# check for it loudly here.
+CACHE_ROOT="$ROOT/cache/SLUS-01115/gcc"
+if [ -d "$CACHE_ROOT" ]; then
+    HAVE=$(find "$CACHE_ROOT" -maxdepth 2 -type d -name 'cg*_gc*' 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$HAVE" -gt 1 ]; then
+        echo
+        echo "note: cache/ holds $HAVE overlay config variants. Only the one whose"
+        echo "      hash matches the CURRENT game.toml is used; the rest are dead"
+        echo "      weight from earlier configs and can be deleted."
+    fi
+fi
+echo
+echo "==> IMPORTANT: if you changed game.toml, the overlay cache is now stale."
+echo "    Recompile it or the game runs interpreted (correct, just several"
+echo "    times slower -- check dispatch_native vs dispatch_interp_fallback):"
+echo
+echo "        sh tools/compile_static_overlays.sh"
+echo
+
+echo "==> done. Next: sh build.sh && sh tools/compile_static_overlays.sh"

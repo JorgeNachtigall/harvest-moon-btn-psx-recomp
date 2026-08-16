@@ -45,3 +45,6 @@ dist/
 # macOS
 .DS_Store
 psx_last_run_report.json
+
+# Runtime diagnostic dumps
+starvation_dump.jsonl

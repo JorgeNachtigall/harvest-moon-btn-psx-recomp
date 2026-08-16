@@ -83,6 +83,28 @@ sh run.sh            # launch; no --disc needed, it resolves from game.toml
 Build type matters: **RelWithDebInfo** keeps the TCP debug server compiled in.
 Release strips it. Never build the generated C at `-O0`.
 
+> ### Editing `game.toml` silently invalidates the overlay cache
+>
+> The cache directory is named `cg<ver>_<emitter>_gc<CONFIG HASH>`, and that
+> config hash covers `[recompiler]` **and** `[widescreen]`. Change any of it and
+> the runtime looks for a directory that does not exist, finds no shards, and
+> runs all ~848 KB of overlay code in the MIPS interpreter. **There is no error
+> message.** The game stays correct and gets several times slower.
+>
+> After any `game.toml` edit:
+>
+> ```sh
+> sh tools/regen.sh && sh build.sh && sh tools/compile_static_overlays.sh
+> ```
+>
+> Confirm it took, via `overlay_loader_status`: `registered` should be ~942 and
+> `dispatch_native` must be non-zero. `dispatch_native: 0` with a large
+> `dispatch_interp_fallback` means the cache is orphaned.
+>
+> This cost an entire debugging session: six config edits in a row were measured
+> on interpreter-only builds, which produced a phantom "the farm is too heavy"
+> crash and a stream of meaningless performance numbers.
+
 ### Overlays — static extraction (the default path)
 
 ```sh
@@ -111,6 +133,27 @@ framework's `compile_overlays.py` consumes unchanged — no framework changes.
 
 Members `MG1`–`MG5` are the five festival minigames, mutually exclusive in
 window A — invisible to capture-driven workflows unless every festival is played.
+
+**Overlay function seeds — why coverage is now ~95% native.** Shards are
+compiled by walking outward from seeds. With only the mode-switch entry points
+and header pointer tables (a few hundred), everything reached through an
+indirect call was never discovered and ran on the MIPS interpreter: **85% of
+overlay dispatches**. `seeds/overlay_functions.json` adds **3279** function
+starts recovered by Ghidra auto-analysis of each member's raw image, imported at
+its real load address. Result:
+
+| | before | after |
+|---|---|---|
+| registered overlay funcs | 942 | **1399** |
+| `dispatch_native` | 113,817 | **1,599,432** |
+| `dispatch_interp_fallback` | 648,441 | **84,225** |
+| interpreted | 85% | **5%** |
+
+Addresses only, so it commits like `seeds/functions.txt`, and
+`tools/extract_overlays.py` consumes it automatically — **users never need
+Ghidra**. Regenerate it only if the seed map changes:
+`sh tools/overlay_seeds.sh` (Ghidra must be CLOSED), then
+`python3 tools/merge_overlay_seeds.py ...`.
 
 ### Packaging a macOS .app
 
@@ -172,6 +215,51 @@ sh tools/save_cache.sh
 `screenshot <path>` (**positional path** — `path=` is taken literally and
 creates a file named `path=...`).
 
+### Reverse engineering the game's rendering
+
+Two documents carry everything learned so far. **Read them before touching any
+draw path** — they encode several days of dead ends.
+
+- **`docs/FRUSTUM.md`** — **the chunk frustum cone: SOLVED.** Widening the two
+  horizontal half-planes fills the 16:9 edge wedges. **Shipped at `d = 8`** —
+  the smallest value that closes them. The knob COSTS FRAME RATE in heavy
+  scenes (`d = 40` drops the graveyard 30 -> 20 FPS); tune it with
+  `tools/frustum_d.py` in the heaviest area you can reach, never in town.
+  One tunable, the recipe to recompute the two patch words, how to retune it
+  LIVE with no rebuild (`write_ram`), the measurement protocol, the cost budget,
+  and three disproved mechanisms not to re-chase. Read this before touching
+  anything frustum-shaped. It also carries the full RAM map and the proof that
+  no free block exists in the 2 MB — do not go looking again.
+- **`docs/RENDERING.md`** — the game's draw paths: which function draws the
+  ground, the sprites, the menu wallpaper; the two screen-bounds culls in the
+  3D renderer and their exact constants; the chunk frustum test; dead code to
+  avoid; packet double-buffering; GTE opcode reference.
+- **`docs/METHOD.md`** — how to find "which function drew this pixel" in three
+  steps, plus the measurement discipline. Use it first, not last.
+
+The short version of the method, because it is the highest-value thing here:
+
+```
+pixel -> which primitive covers it (rasterise a gpu_frame_dump)
+      -> its packet address (src)
+      -> who writes that address (wtrace on that exact range)
+      -> the writer's ra - 8 is the call site
+```
+
+Hard-won rules:
+
+- A packet buffer address does NOT identify its producer — the game
+  double-buffers, and the same range is written by different renderers in
+  gameplay vs cutscenes. Trace the specific packet.
+- A renderer may contain MORE THAN ONE cull. `FUN_8001C37C` has two bounds
+  helpers of different arity; patching one, seeing no change and concluding the
+  renderer was innocent was the single most expensive error in this project.
+  Enumerate every `jal` in the function first.
+- Scan instruction encodings, not just decompiler output. Ghidra had not
+  analysed the region holding one of the culls and reported "no function" there.
+- Measure with numbers (black fraction, per-column primitive coverage, primitive
+  count). Several plausible fixes changed the image by exactly zero pixels.
+
 ### Ghidra
 
 Project `~/ghidra-projects/HarvestMoonBTN`, program `SLUS_011.15.text.bin`
@@ -214,6 +302,12 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 | Overlay shards compiled | **35**; `invalidations` 0, `stale_blocked` 0 |
 | Overlay funcs registered / regions | 51 / 5 |
 | `dispatch_interp_fallback` at title | 75,160 → **615** after static extraction |
+| Native widescreen (16:9) | **working** — 426×240, real FOV; edge wedges fixed by widening the frustum cone to **`d = 8`** (`docs/FRUSTUM.md`), chosen on screen as the smallest value that closes them. 29.97 game FPS at both `d = 0` and `d = 8` on the graveyard save; `d = 40` drops it to 19.89 (branch `feat/native-widescreen`) |
+| Frustum `d` is NOT free | it buys geometry with frame rate, and the cost is invisible in light scenes. Tune live with `python3 tools/frustum_d.py` (needs a build with the two cone patches removed), **in the heaviest area you can reach**. The game also rewrites the angle RAM back to stock on its own — the tool holds the value; what performs that rewrite is still unidentified |
+| Game frame rate vs VSYNC | **they are different numbers and the OSD shows both.** The runtime presents at every simulated vblank, so the present cadence is pinned at 60 Hz regardless of what the game does. The rate a player perceives is the display-area flip rate (GP1(05h) changing), counted in `gpu.c:gp1_display_area_start`. This game runs at **30 FPS** in town and was measured at **20 FPS** (3 vblanks/frame) in a denser area, at BOTH `d = 0` and `d = 60`. `frame_perf` reports `game_fps`, `vsync_hz`, `game_frames` |
+| Primitive packet buffer | **192,000 B**, shared by both render contexts instead of 2 × 96,000 double-buffered — linked-list DMA is synchronous here (`runtime/src/dma.c:700`), so the second buffer bought nothing. This is what makes `d = 60` safe: 104.7% occupancy → 52.4%. Rationale + the 26 patches: `game.toml`, "PACKET BUFFER" |
+| Frame-stats overlay | **off by default — press Ctrl+Y in-game to show it.** Line 1 = `game_fps` + `VSYNC` (these differ — read the first one), line 2 = frame-ms avg/max + prims. Start a session with it up via `PSX_OSD=1 sh run.sh`, or flip it remotely with `debug_client.py osd enable=1`. Timing accumulates while hidden, so it shows real numbers immediately |
+| `window_capture` | new TCP command — reads back the DEFAULT framebuffer at swap, i.e. what is really on screen. `screenshot` (raw VRAM) and `screenshot_hires` (compositor surface) are both blind to GPU-side overlays |
 | MDEC / FMV | **completely untested** — `mdec_decode_count` has never left 0 |
 | Beetle oracle | cloned at pinned `5759277b` in the framework tree, **not built** |
 
@@ -221,6 +315,17 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 
 ## 5. Known issues and traps
 
+- **`.pst` save states snapshot RAM, so they snapshot the render contexts too.**
+  A state taken before the packet-buffer change still describes two 96,000-byte
+  buffers, and the patched init (`FUN_80012598`) never runs again after a load —
+  so measurements taken on an old state describe the OLD layout, and `d = 60`
+  would still overrun on it. Migrate once with
+  `python3 tools/migrate_savestate_pktbuf.py build/state_*.pst` (writes a
+  `.pre-pktbuf` backup, refuses to touch anything it does not recognise). Normal
+  play — boot to memory card — needs none of this. The general lesson: **a save
+  state bypasses every `[[recompiler.patch]]` whose effect was already baked
+  into RAM at capture time.** Code patches still apply; data written by patched
+  code before the snapshot does not.
 - **`[recompiler] bios_config` is ignored on the overlay compile path.**
   `bios_profile_path` is populated only from `--config` (`main_psx.cpp:209`) but
   `compile_overlays.py` passes `--ws-config`. It falls back to searching for
@@ -234,7 +339,9 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 - Overlay tier logs "tcc tier active but no bundled toolchain" — harmless. gcc
   shards still load; in-session compiling is Windows-only regardless.
 - No Vulkan SDK here, so that renderer is a software stub. OpenGL is the default.
-- Keyboard: arrows = D-pad, X = ✕, S = ○, Z = □, A = △, Enter = Start,
+- Keyboard: **Ctrl+Y = show/hide the frame-stats overlay.** F1-F12 load save
+  state 0-11, Shift+F1-F12 save; Alt+Enter or Cmd/Ctrl+F fullscreen; Ctrl+C
+  forces a CD reinsert. Pad: arrows = D-pad, X = ✕, S = ○, Z = □, A = △, Enter = Start,
   RShift = Select, Q/W = L1/R1.
 
 ---
