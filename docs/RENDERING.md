@@ -266,9 +266,63 @@ while (a1 < 0x108)     Y bound = 264 = 240 + 24
 | `slti v0,s0,0x158` (X bound) | `0x800224A0` | `0x2A020158` |
 | `sltiu v0,a1,0x108` (Y bound) | `0x800224B4` | `0x2CA20108` |
 
-`game.toml` widens X by three tiles each side (start `-0xC → -0x54`, bound
-`0x158 → 0x1A0`). **Verified in play**: the wallpaper fills the widened frame.
+`game.toml` widens X by **four** tiles each side (start `-0xC → -0x6C`, bound
+`0x158 → 0x1B8`). **Verified in play**: the wallpaper fills the widened frame.
 The Y bound is untouched — 16:9 widens horizontally only.
+
+### The grid may only be widened in multiples of FOUR tiles per side
+
+Not three, which is what the reveal arithmetic suggests and what shipped first.
+This is the tightest constraint in the file and it is invisible in a still
+frame — it only shows up as a hitch in the scroll every ~3.2 s.
+
+**The scroll.** A frame counter at `gp+0xBC` gives
+
+```
+s3 = (frames / 4) % 24
+```
+
+subtracted from **both** the tile X and the tile Y, so the sheet drifts up-left
+one pixel every four frames and snaps back every 24 — exactly one tile. The
+snap is meant to be invisible: slide a full tile diagonally, jump back, and if
+the pattern repeats correctly the player sees endless scrolling.
+
+**The pattern.** Cell `(i,j)` draws `tbl[(net*j + 1 + i) % 4]`, where the
+4-entry table at `0x80055974` is `{0, 2, 1, 3}` (four *distinct* variants — a
+phase error is visible) and `net` = columns per row. `s2` is bumped once at the
+row head, once per column, and decremented once on loop exit, so `net` is just
+the column count.
+
+**The condition.** The snap is invisible iff the pattern survives a one-tile
+diagonal shift — cell `(i-1,j-1)` must draw what cell `(i,j)` drew:
+
+```
+(net*(j-1) + 1 + (i-1)) ≡ (net*j + 1 + i)   (mod 4)
+  ⟺  columns per row ≡ 3  (mod 4)
+```
+
+Stock: x from `-0xC` to `0x158` step `0x18` = **15** columns, `15 % 4 == 3`. ✅
+That is not luck — it is why those two constants are what they are.
+
+| widening | start | bound | columns | `% 4` | scroll |
+|---|---|---|---|---|---|
+| stock 4:3 | `-0xC` | `0x158` | 15 | 3 | seamless |
+| +3 tiles/side | `-0x54` | `0x1A0` | 21 | 1 | **visible reset every 96 frames** |
+| +4 tiles/side | `-0x6C` | `0x1B8` | 23 | 3 | seamless |
+
+Because 4 ≡ 0 (mod 4), the four-tile widening also lands the phase at every
+screen position exactly where stock had it — the 4:3 centre of the wallpaper is
+identical to the original, not merely seamless.
+
+Two tiles per side (19 columns) also satisfies `≡ 3`, but 48 px does not cover
+the 53 px reveal: at `s3 = 23` the rightmost tile ends at x 373 and leaves a
+one-pixel column bare. Four is the smallest widening that is both wide enough
+and in phase. Cost: 23×11 = 253 rects/frame vs 231, menu-only.
+
+**How this was found** — the wrap condition is arithmetic, so it was settled
+without a rebuild: rasterise the tile-index grid for `s3 = 23` and for `s3 = 0`
+shifted one more pixel along the travel direction, then count sample points
+where the two disagree. Stock 0/1740, +3 tiles 1680/1740, +4 tiles 0/1740.
 
 ---
 
