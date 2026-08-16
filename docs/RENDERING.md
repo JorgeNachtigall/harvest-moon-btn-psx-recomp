@@ -115,8 +115,9 @@ Simpler: no early-out, just "keep if any vertex is on screen".
 
 This is why geometry pops into view the instant it touches the original screen
 edge, and why only primitives straddling that edge bleed slightly into a widened
-margin. With the OpenGL tint seam marking the 4:3 boundary (§7), the behaviour is
-directly observable in play.
+margin. This used to be directly observable in play against the OpenGL tint seam,
+which happened to mark the 4:3 boundary — that seam is fixed now (§7), so use
+`wide_shot` and read the columns either side of x=53 / x=373 instead.
 
 ### Widening it
 
@@ -303,28 +304,63 @@ this address; it never analysed the region.
 
 ---
 
-## 7. Frame composition and the OpenGL seam
+## 7. Frame composition and the margin-colour seam — FIXED
 
 The runtime keeps canonical PSX VRAM faithful at 4:3 — with widescreen engaged,
 `draw_area` is still `[0,240,319,479]` and `draw_offset_x` is `0`. Margin content
 reaches the screen only through the wide compositor's **mirror** of framebuffer-
 targeting primitives. See `psxrecomp/docs/internal/NATIVE_WIDE_PLAN.md`.
 
-The game draws a full-screen tint as a single semi-transparent flat quad:
+The game draws a full-screen environmental tint as one semi-transparent flat
+quad, **every frame**, its colour varying with the in-game clock:
 
 ```
-0x2a000014  0x0  0x140  0xf00000  0xf00140     (0,0)-(320,240), colour 0x14 red, ot=15
+0x2a2d4650  0x0  0x140  0xf00000  0xf00140   (0,0)-(320,240) GP0 0x2A, ot=15
+                                              semi mode 2 (B-F), colour R80 G70 B45
 ```
 
 It satisfies every condition of the full-screen fast path in `gp0_exec_mono_quad`
-(`gpu.c:3045`), so `ws_expand_fullscreen_rect` widens it correctly — and the
-**software renderer proves it**, producing a uniform tint edge to edge (seam step
-−0.1 vs OpenGL's +15.0). The OpenGL backend drops that expansion.
+(`gpu.c:3046`), so `ws_expand_fullscreen_rect` widens it to the full 426 px
+**before it ever reaches a backend**. The software renderer applies it uniformly
+edge to edge.
 
-**This is a framework bug** in `gpu_gl_renderer.c`, not a game issue, and is
-still open. The visible one-pixel step at x=53 and x=373 is an accidental gift:
-it marks the exact 4:3 boundary on screen, which is how the "geometry pops in
-when it touches the line" behaviour was spotted in the first place.
+**The OpenGL backend applied it to the reveal margins on a different schedule
+from the 4:3 centre**, so the margins came out visibly darker in G/B — a hard
+colour seam at the old screen edge. Measured on the graveyard save, margins vs
+centre: **ΔG −24, ΔB −40, ΔR 0** (ΔR exactly zero, which is what ruled out every
+"the tint is simply missing / applied twice" theory).
+
+**Cause.** `gpu_flat_rect` (`gpu_gl_renderer.c`) has a full-screen-overlay
+special case: it sets `s_wide_suppress`, draws the two canonical triangles, then
+paints the overlay across the whole wide surface itself via
+`wide_flat_rect_direct`. But the canonical triangles go through the **deferred
+flat batch** — `gpu_geometry` only *queues* them, and `flush_flat_batch` draws
+them later. `s_wide_suppress` is cleared as soon as they are queued, so it never
+reaches the flush that actually mirrors them. The wide surface therefore received
+the overlay out of step with the canonical framebuffer.
+
+The special case was also **redundant here**: once `ws_expand_fullscreen_rect`
+has widened the rect, the generic per-prim mirror's own x-translation
+(`wide_dx`) already spans `[0, g_wide_w)`.
+
+**Fix** (`gpu_gl_renderer.c`, `gpu_flat_rect`): take the direct wide pass **only
+when the generic mirror would not already cover the whole wide surface** — i.e.
+skip it when `x + wide_dx() <= 0 && x + wide_dx() + w >= g_wide_w`. The
+pre-widened rect then rides the same batch, in the same order, as its canonical
+twin. The direct pass is retained for the case where the rect was *not*
+pre-widened (a framebuffer at `base_x != 0`, which
+`ws_expand_fullscreen_rect`'s VRAM-x test cannot recognise as full-screen).
+
+**Verified** against the software renderer as reference: centre and both margins
+agree to within the usual ~8/255 backend dithering offset, at two very different
+times of day. Seam step at x=53 fell from 25–29 to <1.5 (monotonic scene
+gradient). 4:3 is untouched by construction — the whole block is inside
+`if (g_wide_cur)`, which is 0 unless native-wide is engaged.
+
+> The old seam had one accidental use: it marked the exact 4:3 boundary on
+> screen, which is how the "geometry pops in when it touches the line" behaviour
+> was originally spotted. That crutch is gone — use `wide_shot` (native 426×240,
+> both backends) and compare the x=52|53 and x=372|373 pixel pairs instead.
 
 ---
 
