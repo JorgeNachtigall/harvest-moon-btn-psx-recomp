@@ -137,10 +137,18 @@ after    left-margin black 0.002   right 0.000   whole frame 0.000
 
 ## 3. The chunk frustum test — `FUN_8001C1C0`
 
-`0x8001C1C0`. Per-chunk visibility, called from `FUN_8001C0D4`'s loop; rejected
-chunks never have packets built at all.
+**This section's old verdict ("do not relax — too expensive") was wrong, and was
+based on broken instruments. The frustum is now WIDENED in the shipped build and
+it fixes the 16:9 edge wedges. Shipped at `d = 8`; larger values cost frame
+rate in heavy scenes.**
 
-Transforms the chunk position into view space, then tests four half-planes:
+> **Full guide: [`FRUSTUM.md`](FRUSTUM.md)** — the one tunable, how to recompute
+> the patch words, how to tune it live with no rebuild, the measurement
+> protocol, the cost budget, and three disproved mechanisms not to re-chase.
+
+`0x8001C1C0`. Per-chunk visibility, called from `FUN_8001C0D4`'s loop; rejected
+chunks never have packets built at all. Returns 1 only if all four half-planes
+pass; the caller draws on non-zero (`if (iVar1 != 0) FUN_8001C37C(...)`).
 
 ```c
 if ((N0·v < 0) || (N1·v < 0) || (N2·v < 0)) return 0;
@@ -151,32 +159,34 @@ else return ~(N3·v) >> 31;
 |---|---|
 | plane normals (4 × 3 × int16, Q12, unit ≈ 4096) | `0x80061EA8`–`0x80061EBE` |
 | camera position (3 × int32) | `0x80061EC8` / `0x80061ECC` / `0x80061ED0` |
-| rebuilt each frame by | `FUN_8001D348` (writers `0x8001D59C/5E8/61C`) |
+| rebuilt each frame by | `FUN_8001D348` |
+| **base normal set it rotates** | **`0x800A4008`** |
+| **the four rotation angles (EXE data)** | **`0x800491E0`..`EC`** |
 | rejections | `bltz` at `0x8001C29C` / `0x8001C2DC` / `0x8001C31C` |
 
-Typical live values: `P0=(-2434,-303,-3291)`, `P1=(3289,-303,2434)`,
-`P2=(1655,3381,-1657)`, `P3=(-947,-3890,947)`. **The normals are identical
-across different areas and camera positions** — they are camera-relative
-constants, not per-map data.
+**The cone is a COARSE PRE-CULL.** Final visibility is decided by the
+per-primitive screen-bounds test inside `FUN_8001C37C`, already widened to the
+16:9 frame by `[widescreen.cull]` (§2). That is why *disabling* planes is the
+wrong lever — it admits chunks that are then drawn off-screen — while *widening*
+the cone admits exactly the newly-visible ones.
 
-**Do not widen this.** Two variants were tried and both reverted:
+**How it is widened:** the two horizontal angles are symmetric (`2156 = 2048+108`
+and `-108`); opening them by `d = +8` (≈0.70°) fills the wedges. A
+`[[recompiler.patch]]` cannot edit the angle *data* — the game reads it from RAM
+at runtime — so the two *loads* are patched to immediates instead
+(`0x8001D45C`, `0x8001D4A4`). See `FRUSTUM.md` §3.
 
-| variant | prims/frame | result |
-|---|---|---|
-| full bypass (always "visible") | 2310 (vs 289) | clean frame, but the farm ran slowly and **crashed** |
-| horizontal planes only (NOP `bltz` at `0x8001C29C`/`0x8001C2DC`) | 1664 | `total_ms_avg` unchanged, but `total_ms_max` 26 ms → **51 ms**; farm visibly dropped frames |
+Measured on the black-tile save (stationary, 1280×720): `gp0_draw` 412 → 469 per
+frame, `total_ms` 16.667 avg / 17.210 max, and the visible wedge row band 1058 →
+21 black pixels. Benefit **saturates at +60**.
 
-Reverting took `total_ms_max` back to 16.674 ms against a 16.667 ms budget — no
-spikes at all. **Judge this by `total_ms_max`, not `total_ms_avg`**: the averages
-differed by 0.02 ms while the game stuttered badly.
+**Judge cost by `total_ms_max`, and use `gpu_state.gp0_draw` per frame for
+geometry** — `frame_perf.prims_avg` counts a narrower subset and moved the
+opposite way during this work (300 → 199 while `gp0_draw` rose 387 → 652).
 
-It is not worth it either way. The screen-bounds culls in §2 already take
-whole-frame black from 0.043 to **0.0003** at baseline performance; relaxing the
-frustum only closed that last 0.0003, and additionally revealed scenery the game
-deliberately culls.
-
-Note the rejections are `bltz` (REGIMM), so `[[widescreen.cull.keep]]` cannot
-reach them — that key only accepts `SLT`/`SLTU`/`SLTI`/`SLTIU`.
+The real ceiling is the primitive packet buffer, which has **no bounds check**
+(`FRUSTUM.md` §5): stock occupancy is 34%, and the old "full bypass" variant
+crashed by overrunning it — not by being slow.
 
 ---
 
@@ -323,6 +333,13 @@ when it touches the line" behaviour was spotted in the first place.
 The game **double-buffers** its GPU packet memory, alternating between roughly
 `0x801C2000`–`0x801C7400` and `0x801D9000`–`0x801E0000`. Consecutive frames in
 the same scene use different buffers.
+
+> **Not any more, as patched.** `game.toml` ("PACKET BUFFER") points both render
+> contexts at the single base `0x801C2440` with a 192,000-byte extent, because
+> linked-list DMA is synchronous in this runtime and the second buffer bought
+> nothing. Packets now always live in `0x801C2440`–`0x801F1240`. The **ordering
+> tables** are still double-buffered (`0x801BE440` / `0x801C0440`). Old traces
+> and any of the addresses below that fall in the second buffer predate this.
 
 **A packet's address does not identify its producer.** Tracing writes to
 `0x1C2400`–`0x1C7400` during gameplay finds the sprite emitter; the same range

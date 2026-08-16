@@ -76,24 +76,134 @@ bios_config = "psxrecomp/bios/OpenBIOS.toml"
 # entity class that is not what we are chasing. Retest somewhere with objects
 # near the right edge before trusting it.
 # ---------------------------------------------------------------------------
-# Chunk frustum: DO NOT RELAX.  See docs/RENDERING.md §3.
+# Chunk frustum: DO NOT RELAX -- it CANNOT affect widescreen margins.  SETTLED.
 #
-# FUN_8001C1C0 rejects chunks against four frustum half-planes. Two variants
-# were tried and BOTH were reverted for cost:
+# Fully re-investigated 2026-08-13. Every previously recorded reason for this
+# verdict was wrong; the verdict itself stands, for a reason nobody had tested.
 #
-#   full bypass (return "visible" always) -- 2310 prims/frame vs 289 baseline;
-#     ran very slowly in the farm and CRASHED.
-#   horizontal planes only (NOP the bltz at 0x8001C29C / 0x8001C2DC) -- 1664
-#     prims/frame; frame-time AVERAGE looked identical to vanilla (16.65ms), but
-#     total_ms_max went 26ms -> 51ms and the farm visibly dropped frames.
+# THE FINDING: relaxing (or widening) the chunk frustum changes ZERO visible
+# pixels. The cone is a COARSE PRE-CULL. What actually decides visibility is the
+# per-primitive screen-bounds cull in FUN_8001C37C, and [widescreen.cull] below
+# ALREADY widens that to the 16:9 frame. So everything visible is drawn already;
+# opening the cone only lets more chunks be CONSIDERED, and their primitives are
+# then rejected by the bounds test or land off-screen. Pure waste.
 #
-# The lesson: judge this by total_ms_max, not total_ms_avg. Spikes are what the
-# player feels; the average hides them completely.
+# PROOF (live A/B on a static scene -- an open dialog box halts the character,
+# which is the only way to hold this game still; see the drift warning below):
+#   cone delta   gp0_draw/frame   packet buf   margin black L / R
+#      +0            408.7           34.0%        0.2770 / 0.1674
+#     +20            470.0           40.2%        0.2751 / 0.1674
+#     +40            507.5           44.0%        0.2751 / 0.1674
+#     +60            579.5           50.8%        0.2751 / 0.1674
+#     +80            652.8           57.4%        0.2751 / 0.1674
+# +60% draw commands, IDENTICAL margins -- identical to four decimals in all 16
+# column bands of the frame. The extra geometry is invisible.
 #
-# It is not worth it. The screen-bounds culls in [widescreen.cull] already take
-# whole-frame black from 0.043 to 0.0003 at baseline performance; relaxing the
-# frustum only closed that last 0.0003 and revealed some scenery the game
-# deliberately culls.
+# HOW TO TUNE THE CONE LIVE (no rebuild -- use this before ever patching again):
+# FUN_8001D348 rebuilds the four plane normals each frame by rotating a base set
+# at 0x800A4008 by four angles held in EXE DATA:
+#   0x800491E0 = 2156   0x800491E4 = -108   (the two HORIZONTAL planes, +-108)
+#   0x800491E8 =   93   0x800491EC = 1962   (the two vertical planes)
+# Widen by moving the pair APART (0x800491E0 += d, 0x800491E4 -= d); narrow by
+# moving them together. They are re-read from RAM every frame, so `write_ram`
+# retunes the cone instantly on a running build. NOTE: a [[recompiler.patch]]
+# CANNOT change these -- patches are applied to the image the RECOMPILER
+# consumes, while the game reads this data from RAM at runtime. A .psxmod
+# package is the only build-time-durable route.
+#
+# MEASUREMENT TRAPS THAT PRODUCED THREE WRONG VERDICTS -- read before retesting:
+#  1. `scene_gpu_ms` was a WHOLE-FRAME SPAN, not GPU busy time. It read 9.084 ms;
+#     true scene GPU cost is 0.2-0.8 ms. Fixed in the framework.
+#  2. `mirror_gpu_ms` was always 0.000 -- glQueryCounter returns 0 on Apple GL.
+#     Now withheld behind `mirror_timing_ok`. Fixed in the framework.
+#  3. `prims_avg` COUNTS A NARROWER SUBSET THAN IT APPEARS TO. It FELL 300 -> 199
+#     under relaxation while the GPU-side `gpu_state.gp0_draw` ROSE 387 -> 652
+#     per frame. Judging by prims_avg says "relaxing destroys geometry" -- false.
+#     USE gp0_draw PER FRAME as the geometry metric.
+#  4. THE SCENE DRIFTS ON ITS OWN (the character walks, the clock runs, NPCs
+#     start dialogs). Wall-clock A/B compares different scenes. Either sample at
+#     equal guest frame_count (`freeze_check`), or do what the table above did
+#     and measure inside a dialog box, where the world is frozen.
+#
+# COST, if it were ever wanted: it is affordable but eats the safety margin.
+# The primitive packet buffer has NO BOUNDS CHECK -- FUN_8001C37C advances a
+# write pointer (ctx+0x118, reset to base ctx+0x124 each frame by FUN_800120C8)
+# and never tests the 96000-byte extent at ctx+0x11C. Relaxation takes occupancy
+# 34% -> 90%; the old "full bypass" variant (~2.5x again) CRASHED for this
+# reason, not for cost. The GPU meanwhile sits at ~7% utilisation and ~34% of
+# every frame is the game's own vblank poll at 0x80032CFC.
+#
+# WHY THE BUFFER CANNOT SIMPLY BE GROWN (FUN_80012598, the allocator):
+#   arena      = 0x801BE1B0, memset 0x3EE50 = 257,616 B
+#   OT[i]      = arena + i*0x2000 + 0x290       (2 x 8192)
+#   packet[i]  = arena + i*96000  + 0x4290      (2 x 96000, size field ctx+0x11C)
+# The two packet buffers occupy 0x801C2440..0x801F1240 and aux A starts at
+# EXACTLY 0x801F1240 -- the arena is packed with zero slack, so enlarging either
+# packet buffer overwrites aux A. Only ~24 KB is free at the arena top
+# (0x801F7000..0x801FD000), i.e. ~12 KB per buffer (+12%), and the full-bypass
+# variant needs ~2.5x. Relocating the arena wins at most ~108 KB (the gap above
+# overlay window B, which ends 0x801A3BE8) -- still far short. Conclusion: the
+# full frustum bypass cannot be made memory-safe by enlarging buffers.
+#
+# RAM layout, read live from both contexts (ctxA 0x8005E5E8, ctxB 0x8005E71C,
+# 0x134 apart; DAT_8005E3C0 points at the active one). All CONTIGUOUS:
+#   0x801BE440..0x801C0440  OT A            8192 B  (0x800 entries)
+#   0x801C0440..0x801C2440  OT B            8192 B
+#   0x801C2440..0x801D9B40  packet buf A   96000 B  (base ctx+0x124, len +0x11C)
+#   0x801D9B40..0x801F1240  packet buf B   96000 B
+#   0x801F1240..0x801F4120  aux buf A      12000 B  (base ctx+0x12C, len +0x128)
+#   0x801F4120..0x801F7000  aux buf B      12000 B
+#   0x801F7000..0x801FFFF0  stack region (sp base 0x801FFFF0, ~36 KB)
+#
+# ALSO RULED OUT: the OT index. idx = OTZ>>2 into a 2048-entry table with no
+# bound check, and OTZ is unsigned to 65535, so it looked like the culprit. A
+# clamp was built and applied at all 8 insert sites (sltiu/bne/addiu into the
+# spare nop and the provably-dead negative-rounding path). It changed NOTHING --
+# identical gp0_draw, identical image. The surviving plane-3 test already bounds
+# Z. Do not spend time here again.
+#
+# WHERE THE REMAINING MARGIN BLACK ACTUALLY COMES FROM: not this. Look at the
+# 2D/sprite layer and the map's own extent instead. Caution when measuring: a
+# "black pixel" threshold also counts genuinely dark CONTENT (rocks, water,
+# shadow), which is most of the 0.27 figure above -- it is not all missing
+# geometry.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Widescreen: WIDEN THE CHUNK FRUSTUM CONE.  [WORKS, BUT d=60 CRASHED -- see below]
+#
+# !! 2026-08-13: d = 60 OVERRAN the primitive packet buffer in a dense scene
+# !! (ctxB 109,840 / 96,000 = 114.4%) and halted with GPU GP0 unknown cmd 0xFC.
+# !! The black-tile save peaks at only 54.1%, so it is NOT the worst case.
+# !! Stock d=0 already runs ~79% in that dense scene: ~20% headroom total.
+# !! Read docs/FRUSTUM.md SS5 before shipping any d.
+# !!
+# !! MEASURED at the crash spot: stock d=0 is ALREADY 80.9% occupancy; d=+40 hits
+# !! 102.7% and dies. Walking at stock peaked 85.2% elsewhere, so no scene is a
+# !! safe reference. NO value of d is safe without a hard primitive cap.
+# !! THE PATCHES ARE CURRENTLY REMOVED (stock cone, d=0) -- this build is safe.
+#
+#   >>> FULL GUIDE: docs/FRUSTUM.md  -- read it before changing these. <<<
+#
+# Removes the black wedges at the left/right edges of the 16:9 frame, at 60 fps.
+# It does NOT disable any frustum plane (that was tried; it admits geometry that
+# is drawn off-screen and costs far more -- see docs/FRUSTUM.md §6).
+#
+# ONE TUNABLE, d (shipped: d = 60; stock: d = 0). Benefit SATURATES at 60:
+#     angle[0] = 2156 + d   -> patched at 0x8001D45C
+#     angle[1] = -108 - d   -> patched at 0x8001D4A4
+# Both replacements are `addiu a0,zero,N` = 0x24040000 | (N & 0xFFFF).
+# Recompute them, and tune d LIVE via write_ram with no rebuild, using the
+# recipes in docs/FRUSTUM.md §1-§2.
+#
+# These patch the LOADS, not the data: the angles live in EXE data at
+# 0x800491E0..EC, which the game reads from RAM at runtime, so a data patch has
+# no effect -- [[recompiler.patch]] only edits the image the recompiler consumes.
+#
+# Measured (black-tile save, stationary, 1280x720): gp0_draw/frame 412 -> 469,
+# total_ms 16.667 avg / 17.210 max, scene_gpu 0.463 ms, and the wedge row band
+# 1058 -> 21 black px. Watch total_ms_max and the packet-buffer occupancy
+# (docs/FRUSTUM.md §5) -- that buffer has NO bounds check.
 # ---------------------------------------------------------------------------
 
 [[recompiler.patch]]
@@ -123,6 +233,286 @@ address     = "0x800224A0"
 expected    = "0x2A020158"   # slti v0,s0,0x158  (344 = 320 + one tile)
 replacement = "0x2A0201A0"   # slti v0,s0,0x1A0  (416 = 344 + three tiles)
 note        = "Ground tile grid: end 3 tiles right of the 4:3 edge"
+
+# ---------------------------------------------------------------------------
+# PACKET BUFFER: 96,000 -> 192,000 bytes, by SHARING one buffer between the
+# two render contexts instead of double-buffering it.
+#
+# WHY. The 3D renderer (FUN_8001C37C) advances its write pointer 5-7 words per
+# primitive with NO bounds check. At the stock cone the worst measured frame
+# used 85.2% of the 96,000-byte buffer; widening the frustum to d=+60 pushes
+# that to 104.7% -- it runs off the end into the next context's buffer and the
+# GPU is handed garbage ("GP0 unknown command 0xFC"). That is the crash.
+#
+# WHY THERE IS ROOM. There is none: all 2 MB of PS1 RAM is live. Measured, the
+# 107,464-byte hole between the top of overlay window B (0x801A3DE8) and the
+# arena base (0x801BE1B0) is NOT free -- it holds sprite tables pointed to from
+# 0x80071CA4/0x800781F8/0x80078CF0/0x8007926C, allocated downward from the
+# arena base. The largest all-zero run anywhere in RAM is 71,680 bytes.
+#
+# SO INSTEAD, STOP PAYING FOR DOUBLE BUFFERING. The arena reserves
+# base+0x4290 .. base+0x33090 as TWO 96,000-byte packet buffers, one per
+# render context. Double buffering exists so the GPU can DMA frame N's packet
+# list while the CPU builds frame N+1. In THIS runtime that overlap does not
+# exist: linked-list DMA is fully synchronous (psxrecomp/runtime/src/dma.c:700
+# -746 walks the whole ordering table and pushes every GP0 word inside the
+# store to DMA2's control register), so DrawOTag has entirely consumed the
+# buffer before it returns. Pointing both contexts at the same base therefore
+# yields one 192,000-byte buffer occupying the exact same bytes -- no
+# relocation, no RAM found, no framework change. 104.7% becomes 52.4%.
+#
+# The ordering tables stay double-buffered (ctx+0x120, stride 0x2000); only the
+# primitive arena is shared. Per-frame reset (FUN_800120C8, ctx+0x118 =
+# ctx+0x124) rebuilds it from scratch every frame, so nothing persists across
+# frames that sharing could destroy.
+#
+# WHERE. Three init paths, all patched:
+#   FUN_8001231C  first loop (stride) then tail-calls FUN_8001E160
+#   FUN_80012598  first loop (stride) + its own inlined copy of the second loop
+#   FUN_8001E160  the shared second loop
+# Each second loop computes ctx+0x124 = arena + 0x4290 + i*96000 with a
+# strength-reduced multiply (sll/addu/subu chain, 375<<8). Forcing i*96000 to 0
+# collapses that chain to `addu v0,zero,zero` + 6 nops. Verified by scanning
+# every branch and jump in the image: nothing targets the interior of either
+# chain, so nopping it is safe.
+#
+# TO RESIZE LATER: the buffer length is ctx+0x11C, set from the "pktbuf-size-*"
+# pairs (0x2EE00 = 192,000). The init byte-clear bound "pktbuf-clear-*" must
+# stay exactly length-1 (0x2EDFF) or init leaves the tail dirty. The buffer may
+# not exceed 0x2EE00 without moving the aux buffers: it starts at arena+0x4290
+# and 0x4290 + 0x2EE00 = 0x33090, which is exactly aux buffer A's base.
+# Occupancy is (ctx+0x118 - ctx+0x124) / ctx+0x11C -- see docs/FRUSTUM.md section 5.
+# ---------------------------------------------------------------------------
+
+[[recompiler.patch]]
+id          = "pktbuf-share-stride-a"
+address     = "0x800123B0"
+expected    = "0x3C160001"
+replacement = "0x3C160000"
+note        = "lui s6,1 -> lui s6,0   (FUN_8001231C: packet-buffer stride)"
+
+[[recompiler.patch]]
+id          = "pktbuf-share-stride-a2"
+address     = "0x800123B4"
+expected    = "0x36D67700"
+replacement = "0x36D60000"
+note        = "ori s6,s6,0x7700 -> 0  stride 96000 -> 0: ctx B reuses ctx A's buffer"
+
+[[recompiler.patch]]
+id          = "pktbuf-share-stride-b"
+address     = "0x8001262C"
+expected    = "0x3C160001"
+replacement = "0x3C160000"
+note        = "lui s6,1 -> lui s6,0   (FUN_80012598: same stride)"
+
+[[recompiler.patch]]
+id          = "pktbuf-share-stride-b2"
+address     = "0x80012630"
+expected    = "0x36D67700"
+replacement = "0x36D60000"
+note        = "ori s6,s6,0x7700 -> 0"
+
+[[recompiler.patch]]
+id          = "pktbuf-size-hi-inline"
+address     = "0x800127EC"
+expected    = "0x3C080001"
+replacement = "0x3C080002"
+note        = "lui t0,1 -> lui t0,2   ctx+0x11C length 96000 -> 192000"
+
+[[recompiler.patch]]
+id          = "pktbuf-size-lo-inline"
+address     = "0x800127F0"
+expected    = "0x35087700"
+replacement = "0x3508EE00"
+note        = "ori t0,t0,0x7700 -> 0xEE00  (0x2EE00 = 192000)"
+
+[[recompiler.patch]]
+id          = "pktbuf-size-hi-e160"
+address     = "0x8001E194"
+expected    = "0x3C050001"
+replacement = "0x3C050002"
+note        = "lui a1,1 -> lui a1,2    FUN_8001E160: same length field"
+
+[[recompiler.patch]]
+id          = "pktbuf-size-lo-e160"
+address     = "0x8001E198"
+expected    = "0x34A57700"
+replacement = "0x34A5EE00"
+note        = "ori a1,a1,0x7700 -> 0xEE00"
+
+[[recompiler.patch]]
+id          = "pktbuf-clear-hi-inline"
+address     = "0x800127E4"
+expected    = "0x3C120001"
+replacement = "0x3C120002"
+note        = "lui s2,1 -> lui s2,2    init byte-clear bound 95999 -> 191999"
+
+[[recompiler.patch]]
+id          = "pktbuf-clear-lo-inline"
+address     = "0x800127E8"
+expected    = "0x365276FF"
+replacement = "0x3652EDFF"
+note        = "ori s2,s2,0x76FF -> 0xEDFF (0x2EDFF)"
+
+[[recompiler.patch]]
+id          = "pktbuf-clear-hi-e160"
+address     = "0x8001E178"
+expected    = "0x3C120001"
+replacement = "0x3C120002"
+note        = "lui s2,1 -> lui s2,2    FUN_8001E160: same bound"
+
+[[recompiler.patch]]
+id          = "pktbuf-clear-lo-e160"
+address     = "0x8001E188"
+expected    = "0x365276FF"
+replacement = "0x3652EDFF"
+note        = "ori s2,s2,0x76FF -> 0xEDFF"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-inline-0"
+address     = "0x8001283C"
+expected    = "0x00111040"
+replacement = "0x00001021"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (sll v0,s1,1 -> addu v0,zero,zero)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-inline-1"
+address     = "0x80012840"
+expected    = "0x00511021"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-inline-2"
+address     = "0x80012844"
+expected    = "0x00021100"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-inline-3"
+address     = "0x80012848"
+expected    = "0x00511023"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-inline-4"
+address     = "0x8001284C"
+expected    = "0x000210C0"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-inline-5"
+address     = "0x80012850"
+expected    = "0x00511023"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-inline-6"
+address     = "0x80012854"
+expected    = "0x00021200"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-e160-0"
+address     = "0x8001E1DC"
+expected    = "0x00111040"
+replacement = "0x00001021"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (sll v0,s1,1 -> addu v0,zero,zero)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-e160-1"
+address     = "0x8001E1E0"
+expected    = "0x00511021"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-e160-2"
+address     = "0x8001E1E4"
+expected    = "0x00021100"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-e160-3"
+address     = "0x8001E1E8"
+expected    = "0x00511023"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-e160-4"
+address     = "0x8001E1EC"
+expected    = "0x000210C0"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-e160-5"
+address     = "0x8001E1F0"
+expected    = "0x00511023"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+[[recompiler.patch]]
+id          = "pktbuf-base-e160-6"
+address     = "0x8001E1F4"
+expected    = "0x00021200"
+replacement = "0x00000000"
+note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
+
+
+# ---------------------------------------------------------------------------
+# FRUSTUM CONE: d = +60. Fills the 16:9 edge wedges. See docs/FRUSTUM.md.
+# Safe to ship only because the packet buffer above is now 192,000 bytes --
+# d=60 peaks at 100,532 B, which overran the stock 96,000-byte buffer and was
+# the crash. Measured now: 52.4% occupancy, 16.667 ms avg.
+# To retune d, recompute BOTH replacements together (docs/FRUSTUM.md section 1).
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# FRUSTUM CONE: d = +8.  Fills the 16:9 edge wedges.  See docs/FRUSTUM.md.
+#
+# d = 8 was chosen ON SCREEN as the smallest value that closes the wedges, and
+# it matters that it is small: the cost of this knob is frame rate, and it is
+# NOT free the way earlier notes in this repo claimed.  Measured on the
+# graveyard save (a heavy scene, ~1,500 draws/frame at stock):
+#
+#     d=0  -> 29.97 game FPS,  1,642 draws/frame
+#     d=40 -> 19.89 game FPS,  1,955 draws/frame
+#     d=60 -> 25.45 game FPS,  2,236 draws/frame   (straddles 30 and 20)
+#
+# The game renders on whole vblanks (VSync), so the frame rate is quantised:
+# a scene that no longer fits in two vblank periods drops straight from 30 to
+# 20.  Heavy areas sit right on that boundary at stock, which is why a large d
+# costs a third of the frame rate there while costing nothing in town.
+#
+# Read `game_fps` from `frame_perf`, never `vsync_hz` -- the runtime presents
+# at every simulated vblank, so vsync is pinned at 60 no matter what the game
+# is doing.  Tune this live with `python3 tools/frustum_d.py` (needs a build
+# with these two patches REMOVED; see docs/FRUSTUM.md section 2).
+# ---------------------------------------------------------------------------
+
+[[recompiler.patch]]
+id          = "widescreen-frustum-cone-h0"
+address     = "0x8001D45C"
+expected    = "0x8E0491E0"   # lw a0,angle[0] from 0x800491E0
+replacement = "0x24040874"   # addiu a0,zero,2164   (2156 + d, d = 8)
+note        = "Frustum cone: widen the horizontal half-plane by d=8"
+
+[[recompiler.patch]]
+id          = "widescreen-frustum-cone-h1"
+address     = "0x8001D4A4"
+expected    = "0x8E040004"   # lw a0,angle[1] from 0x800491E0
+replacement = "0x2404FF8C"   # addiu a0,zero,-116   (-108 - d, d = 8)
+note        = "Frustum cone: mirror side, same d. Vertical angles stay stock."
+
 [runtime]
 # Load precompiled overlay shared objects from cache/<game_id>/ ahead of the
 # dirty-RAM interpreter, and record overlay bytes to overlay_captures.json.
