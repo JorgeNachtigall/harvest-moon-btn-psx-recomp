@@ -539,6 +539,51 @@ aspect_ratio = "16:9"
 # the generic GTE-activity classifier applies.
 gte_game_mode = true
 
+# Keep it wide on the PAUSE MENU (and every other in-game 2D screen).
+#
+# THE PROBLEM. gte_game_mode classifies a frame as gameplay by counting GTE
+# projections, and holds that verdict for WS_GTE_GAME_MODE_HYSTERESIS = 45
+# frames (~0.75 s) after the last 3D frame. That rides out a sparse cutscene
+# frame, but the pause menu is pure 2D and projects ZERO verts for as long as
+# it is open, so after 45 frames game_mode flips to 0, present_native_43 to 1,
+# and the menu pillarboxes back to 4:3 with black bars.
+#
+# That also silently wasted the menu-wallpaper widening above: FUN_800223D4's
+# tile loop is patched to cover the 16:9 frame, but a pillarboxed present
+# throws those extra tiles away off-screen.
+#
+# THE FIX. ws_game_mode() consults a RAM gate FIRST and returns its verdict
+# verbatim when configured (gpu.c, ws_gameplay_state_matches), bypassing the
+# GTE heuristic entirely. Harvest Moon already keeps exactly the variable we
+# need: 0x8005E39C, the game mode that FUN_80011370 switches on to pick the
+# overlay member (see seeds/overlays.json). It is a 32-bit word, which is what
+# the gate reads with psx_read_word -- verified, the three bytes above it are
+# zero.
+#
+# Measured:            title screen  mode 0x0D  ->  4:3   (member 27)
+#                      gameplay      mode 0x02  ->  wide  (member 11)
+#                      pause menu    mode 0x02  ->  wide  (member 11)
+#
+# The pause menu shares the gameplay mode, so gating on the mode holds the wide
+# present across it while the title and the other front-end screens still get a
+# faithful 4:3 pillarbox.
+#
+# The value list is every mode that loads member 11 -- objcg\event_s.bin, the
+# world/event overlay -- into window A, straight from seeds/overlays.json.
+# Mode 15 also maps to member 11 but loads it into window B and is marked
+# `unverified` there, so it is deliberately NOT listed.
+#
+# gte_game_mode above stays TRUE: the gate supersedes it for game_mode, but
+# ws_2d_only_scene() still keys off it (it returns 0 early when the GTE
+# detector is configured), and without that a 2D-only scene would pillarbox
+# through the other branch of gpu_ws_present_native_43.
+#
+# NOTE: this is a [widescreen] key, so it is part of the overlay codegen config
+# hash. After editing, rerun the full three-step regen or the overlay cache is
+# orphaned and everything falls back to the interpreter, silently. See CLAUDE.md.
+gameplay_state_addr   = "0x8005E39C"
+gameplay_state_values = ["0x02", "0x06", "0x0E", "0x13", "0x14"]
+
 [widescreen.cull]
 # ---------------------------------------------------------------------------
 # The 3D world renderer's screen-space culls.  See docs/RENDERING.md §2 for the
