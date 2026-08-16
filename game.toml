@@ -58,6 +58,42 @@ bios_config = "psxrecomp/bios/OpenBIOS.toml"
 # 16:9 at 320 wide reveals 53px per side; rounded up to whole 24px tiles that
 # is 72px = 3 tiles. So start 3 tiles earlier and end 3 tiles later.
 #
+# ...EXCEPT THAT 3 IS THE ONE WIDTH THAT BREAKS THE SCROLL. The grid may only
+# be widened in whole multiples of FOUR tiles per side. See below; we use 4.
+#
+# THE TILE PATTERN HAS PERIOD 4, AND THE SCROLL WRAP DEPENDS ON IT.
+#
+# The wallpaper scrolls diagonally: a frame counter at gp+0xBC gives
+# s3 = (frames / 4) % 24, subtracted from BOTH the tile X and the tile Y, so
+# the sheet drifts up-left one pixel every four frames and wraps every 24 --
+# one whole tile. The wrap is meant to be invisible: after sliding a full tile
+# up-left, the grid snaps back and, because the pattern repeats, the player
+# sees uninterrupted scrolling.
+#
+# The tile drawn at grid cell (i,j) is tbl[(net*j + 1 + i) % 4], with the
+# 4-entry table at 0x80055974 = {0, 2, 1, 3} and `net` = the number of columns
+# per row (s2 is bumped once at the row head, once per column, and decremented
+# once on loop exit). For the snap-back to be invisible the pattern must be
+# invariant under a one-tile diagonal shift -- cell (i-1,j-1) must draw what
+# cell (i,j) drew -- which holds if and only if:
+#
+#   columns per row  ==  3  (mod 4)
+#
+# Stock is exactly that: x from -0xC to 0x158 step 0x18 = 15 columns, 15 % 4
+# == 3. That is not luck, it is the reason those two constants are what they
+# are.
+#
+# Widening by 3 tiles per side gives 21 columns, 21 % 4 == 1 -- so every wrap
+# jumped the pattern by two variants and the "endless" scroll visibly reset
+# about every 3.2s (96 frames at 30fps). Widening by 4 per side gives 23,
+# 23 % 4 == 3, seamless again; and because 4 == 0 (mod 4) the phase at every
+# screen position also lands exactly where stock had it, so the 4:3 centre of
+# the wallpaper is pixel-identical to the original.
+#
+# 4 tiles = 96px per side covers the 53px reveal with two columns of overdraw
+# on the right and one on the left: 23x11 = 253 rects/frame vs 231. Menu-only,
+# irrelevant.
+#
 # NOTE: not gated on a wide view -- at 4:3 this simply draws a few off-screen
 # tiles (wasted, harmless). Gate it before this goes anywhere that ships 4:3.
 # Per-object right-edge screen cull. At 0x80018238 the code loads an object's
@@ -217,22 +253,22 @@ note        = "Right-edge visibility cull: extend to the widescreen frame"
 id          = "widescreen-ground-grid-start-x"
 address     = "0x80022468"
 expected    = "0x2410FFF4"   # addiu s0,zero,-0xC
-replacement = "0x2410FFAC"   # addiu s0,zero,-0x54
-note        = "Ground tile grid: begin 3 tiles left of the 4:3 edge"
+replacement = "0x2410FF94"   # addiu s0,zero,-0x6C
+note        = "Menu wallpaper grid: begin 4 tiles left of the 4:3 edge (4, not 3 -- the pattern has period 4)"
 
 [[recompiler.patch]]
 id          = "widescreen-ground-grid-start-x-reset"
 address     = "0x800224BC"
 expected    = "0x2410FFF4"   # addiu s0,zero,-0xC  (per-row reset, delay slot)
-replacement = "0x2410FFAC"   # addiu s0,zero,-0x54
-note        = "Same start, reset at the top of each row"
+replacement = "0x2410FF94"   # addiu s0,zero,-0x6C
+note        = "Same start, reset at the top of each row -- must match the other start exactly"
 
 [[recompiler.patch]]
 id          = "widescreen-ground-grid-x-bound"
 address     = "0x800224A0"
 expected    = "0x2A020158"   # slti v0,s0,0x158  (344 = 320 + one tile)
-replacement = "0x2A0201A0"   # slti v0,s0,0x1A0  (416 = 344 + three tiles)
-note        = "Ground tile grid: end 3 tiles right of the 4:3 edge"
+replacement = "0x2A0201B8"   # slti v0,s0,0x1B8  (440 = 344 + four tiles)
+note        = "Menu wallpaper grid: end 4 tiles right of the 4:3 edge -> 23 columns, 23 % 4 == 3, scroll wraps seamlessly"
 
 # ---------------------------------------------------------------------------
 # PACKET BUFFER: 96,000 -> 192,000 bytes, by SHARING one buffer between the
