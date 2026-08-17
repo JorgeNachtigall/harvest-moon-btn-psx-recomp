@@ -708,15 +708,28 @@ gte_game_mode = true
 # the art fades to white cloud at both edges (measured: canonical x 0..8 is pure
 # white on every scanline sampled). So paint the margins white.
 #
-# nw_backdrop detects the panel (full display width, axis-aligned, >= 64 tall)
-# and nw_backdrop_fill turns that detection into a margin FILL instead of a
-# stretch. The pairing is what scopes it: this is the only full-width backdrop
-# quad the game draws. Audited elsewhere -- the title composes from textured
-# RECTS, the pause/memory-card wallpaper is a rect grid, and dialog boxes fail
-# the edge test (28..291 of 320), so none of them trigger it. The fill also runs
-# at the panel's place in the draw order, so a screen that DOES paint its own
-# margins later (the title's grass, the wallpaper grid) still covers it.
-nw_backdrop      = true
+# nw_backdrop_fill detects that panel and paints the margins. TWO rules keep it
+# off the screens it would wreck -- both learned by wrecking them:
+#
+#  1. FULL-BLEED ONLY (within 8 px of both frame edges). The first cut reused
+#     the stretch detector's 24 px slack, which also matched the PAUSE MENU's
+#     window panel at x 18..302 -- and the diary/pause screens came up white.
+#     The map's panel is x 2..318; a window panel is inset. That is the whole
+#     difference and it is why the tolerance is tight.
+#  2. PAINTED AT THE FRAME CLEAR, not when the panel is drawn. The pause menu
+#     draws its wallpaper grid (OT 34) BEFORE its panel (OT 35), so painting at
+#     panel time erased wallpaper the widened grid had just put in the margins.
+#     Detection now arms a latch and gp0_exec_fill_rect paints the margins when
+#     the game clears its framebuffer, underneath everything -- so any screen
+#     that paints its own margins (title grass, wallpaper) simply covers it.
+#
+# Verified against the save states: slot 0 (map) white margins, slot 1 (diary /
+# pause) full wallpaper pattern and an un-widened panel, gameplay untouched,
+# title still grass.
+# nw_backdrop (the STRETCH) stays OFF: this game's full-width quads are window
+# panels, and widening those just makes boxes wider than their text. The fill
+# below is what we want, and it takes precedence over the stretch anyway.
+nw_backdrop      = false
 nw_backdrop_fill = "0xFFFFFF"
 
 gameplay_state_addr   = "0x8005E39C"
