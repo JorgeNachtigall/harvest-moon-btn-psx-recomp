@@ -596,29 +596,64 @@ gte_game_mode = true
 # the gate reads with psx_read_word -- verified, the three bytes above it are
 # zero.
 #
-# Measured:            title screen  mode 0x0D  ->  4:3   (member 27)
+# Measured:            title screen  mode 0x0D  ->  wide  (member 27)
 #                      gameplay      mode 0x02  ->  wide  (member 11)
 #                      pause menu    mode 0x02  ->  wide  (member 11)
 #
 # The pause menu shares the gameplay mode, so gating on the mode holds the wide
-# present across it while the title and the other front-end screens still get a
-# faithful 4:3 pillarbox.
+# present across it, and 0x0D does the same for the whole front-end sequence
+# (Natsume logo -> title). Every other front-end screen still gets a faithful
+# 4:3 pillarbox -- the map screen (Select) and the mode-0x08 load screen are
+# unlisted and unchanged.
 #
-# The value list is every mode that loads member 11 -- objcg\event_s.bin, the
-# world/event overlay -- into window A, straight from seeds/overlays.json.
+# 0x02/0x06/0x0E/0x13/0x14 are every mode that loads member 11 -- objcg\event_s.bin,
+# the world/event overlay -- into window A, straight from seeds/overlays.json.
 # Mode 15 also maps to member 11 but loads it into window B and is marked
 # `unverified` there, so it is deliberately NOT listed.
+#
+# 0x0D is the TITLE sequence (member 27). It is listed for the widescreen title
+# (docs/RENDERING.md 6) and needs nw_backdrop_rects below to look right: without
+# it the reveal margins carry only the scrolling grey overlay layer over black.
 #
 # gte_game_mode above stays TRUE: the gate supersedes it for game_mode, but
 # ws_2d_only_scene() still keys off it (it returns 0 early when the GTE
 # detector is configured), and without that a 2D-only scene would pillarbox
 # through the other branch of gpu_ws_present_native_43.
 #
-# NOTE: this is a [widescreen] key, so it is part of the overlay codegen config
-# hash. After editing, rerun the full three-step regen or the overlay cache is
-# orphaned and everything falls back to the interpreter, silently. See CLAUDE.md.
+# NOTE: [widescreen] keys that name CULL SITES or PATCHES are part of the overlay
+# codegen config hash -- editing those without the full three-step regen orphans
+# the cache and drops everything to the interpreter, silently (see CLAUDE.md).
+# These three are NOT hashed: overlay_codegen_config_hash (config_loader.cpp:55)
+# covers the cull-site lists, the flags block, the aspect cone and the
+# instruction patches only. Editing them takes effect on the next launch --
+# gameplay_state_* need no rebuild at all, nw_backdrop_rects needs `sh build.sh`
+# (the recompiler has to learn the key), and the overlay cache stays valid.
 gameplay_state_addr   = "0x8005E39C"
-gameplay_state_values = ["0x02", "0x06", "0x0E", "0x13", "0x14"]
+gameplay_state_values = ["0x02", "0x06", "0x0D", "0x0E", "0x13", "0x14"]
+
+# Fill the title screen's reveal margins ([widescreen] nw_backdrop_rects).
+#
+# The title paints its grass field as TWO opaque textured rects -- 256x240 at
+# (0,0) plus 64x240 at (256,0), one per texture page, CLUT 0x7F54 -- i.e. a
+# 320x240 image blitted at the frame origin. A PS1 sprite cannot scale, so that
+# layer is exactly 4:3 wide and stops dead at x=320; in native-wide the margins
+# were left showing only the scrolling semi-transparent overlay (the SAME image
+# under the grey CLUT 0x7F14, tiled 3x3 and drifting) over the black frame clear.
+# That is what the grey streaky bands on either side of the logo were.
+#
+# The flag stretches full-display-height textured rects -- and only those -- into
+# the wide frame, in the mirror only, so canonical 4:3 VRAM is untouched. On the
+# title exactly two prims per frame qualify (verified by frame dump), and the
+# stretch is invisible because the image is plain grass: no logo, no text, no
+# characters are in it (they are separate prims at OT ranks 28/29, drawn at their
+# authored size and position, which is why the logo and the scrolling PRESS START
+# BUTTON stay pixel-correct).
+#
+# Audited for misfires by dumping every 0x64-0x67 rect on each screen and
+# counting those with y <= 0 and y+h >= 240: gameplay 0/1530, pause menu 0/65,
+# map screen 0/284, attract demo 0/hundreds. Only the title matches. 4:3 is
+# unaffected by construction -- the gate is behind g_wide_w > 0.
+nw_backdrop_rects = true
 
 [widescreen.cull]
 # ---------------------------------------------------------------------------

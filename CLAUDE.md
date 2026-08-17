@@ -303,9 +303,10 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 | Overlay funcs registered / regions | 51 / 5 |
 | `dispatch_interp_fallback` at title | 75,160 → **615** after static extraction |
 | Native widescreen (16:9) | **working** — 426×240, real FOV; edge wedges fixed by widening the frustum cone to **`d = 8`** (`docs/FRUSTUM.md`), chosen on screen as the smallest value that closes them. 29.97 game FPS at both `d = 0` and `d = 8` on the graveyard save; `d = 40` drops it to 19.89 (branch `feat/native-widescreen`) |
-| Widescreen stays on in the PAUSE MENU | **fixed** — `gte_game_mode` alone classifies gameplay by GTE vertex count and gives up 45 frames after the last 3D frame, so any long full-2D screen pillarboxed back to 4:3 (and silently wasted the menu-wallpaper widening). `[widescreen] gameplay_state_addr/values` now gates on the game's own mode word at `0x8005E39C`: **`0x0D` title → 4:3, `0x02` gameplay AND pause menu → wide.** Values = every mode loading member 11 into window A. The RAM gate supersedes the GTE heuristic entirely (`gpu.c:ws_game_mode`) |
+| Widescreen stays on in the PAUSE MENU | **fixed** — `gte_game_mode` alone classifies gameplay by GTE vertex count and gives up 45 frames after the last 3D frame, so any long full-2D screen pillarboxed back to 4:3 (and silently wasted the menu-wallpaper widening). `[widescreen] gameplay_state_addr/values` now gates on the game's own mode word at `0x8005E39C`: **`0x02` gameplay AND pause menu → wide, `0x0D` title → wide (see the next row), everything else → 4:3.** Values = every mode loading member 11 into window A, plus `0x0D`. The RAM gate supersedes the GTE heuristic entirely (`gpu.c:ws_game_mode`) |
+| TITLE SCREEN in 16:9 | **working** — `0x0D` added to `gameplay_state_values`, plus `[widescreen] nw_backdrop_rects`. The title is all 2D (~124 GP0 cmds/frame): its grass field is a 320×240 image blitted as two opaque `0x64` rects at OT 26, and a sprite cannot scale, so the reveal margins showed only the semi-transparent scrolling overlay (same texture, grey CLUT `0x7F14`) over the black clear — the "grey streaks". The new flag stretches full-display-height textured rects, mirror-side only, so the grass fills the frame while the logo, characters and the scrolling PRESS START BUTTON keep their authored size. Audited: gate matches 0 rects in gameplay/pause/map/demo. `docs/RENDERING.md` §6 |
 | Pause-menu wallpaper scroll wraps seamlessly | **fixed** — the tiled background drifts diagonally by `s3 = (frames/4) % 24` and snaps back every 24 px; the snap is invisible only if the 4-variant tile pattern survives a one-tile diagonal shift, which requires **columns per row ≡ 3 (mod 4)**. Stock is 15 ✅; widening by 3 tiles/side made it 21 ✗ and the "endless" scroll visibly reset every ~3.2 s. Now widened by **4** tiles/side → 23 ✅, and since 4 ≡ 0 (mod 4) the 4:3 centre is also phase-identical to stock. **The grid may only ever be widened in whole multiples of 4 tiles per side.** `docs/RENDERING.md` §5 |
-| Full-screen tint vs the 16:9 margins | **fixed** in the framework — the margins used to render a different colour from the 4:3 centre (ΔG −24, ΔB −40, ΔR 0). `docs/RENDERING.md` §7 |
+| Full-screen tint vs the 16:9 margins | **fixed** in the framework — the margins used to render a different colour from the 4:3 centre (ΔG −24, ΔB −40, ΔR 0). `docs/RENDERING.md` §8 |
 | Frustum `d` is NOT free | it buys geometry with frame rate, and the cost is invisible in light scenes. Tune live with `python3 tools/frustum_d.py` (needs a build with the two cone patches removed), **in the heaviest area you can reach**. The game also rewrites the angle RAM back to stock on its own — the tool holds the value; what performs that rewrite is still unidentified |
 | Game frame rate vs VSYNC | **they are different numbers and the OSD shows both.** The runtime presents at every simulated vblank, so the present cadence is pinned at 60 Hz regardless of what the game does. The rate a player perceives is the display-area flip rate (GP1(05h) changing), counted in `gpu.c:gp1_display_area_start`. This game runs at **30 FPS** in town and was measured at **20 FPS** (3 vblanks/frame) in a denser area, at BOTH `d = 0` and `d = 60`. `frame_perf` reports `game_fps`, `vsync_hz`, `game_frames` |
 | Primitive packet buffer | **192,000 B**, shared by both render contexts instead of 2 × 96,000 double-buffered — linked-list DMA is synchronous here (`runtime/src/dma.c:700`), so the second buffer bought nothing. This is what makes `d = 60` safe: 104.7% occupancy → 52.4%. Rationale + the 26 patches: `game.toml`, "PACKET BUFFER" |
@@ -318,6 +319,18 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 
 ## 5. Known issues and traps
 
+- **PRESSING START AT THE TITLE CRASHES THE GUEST — pre-existing, unfixed.**
+  Boot to the title, press Start: the mode word `0x8005E39C` goes `0x0D → 0x08`,
+  the screen stops swapping and the runtime halts with
+  `DISPATCH FATAL: misaligned target 0x170DAFB3`, `$ra = 0x80012954`,
+  `$a0 = 0x80203D6F` (past the 2 MB RAM top), `$a1 = 0x8012DDE8` (**overlay
+  window B**), `$a2 = 0x0005DC00` (384,000 B). So mode 8 loads a member into
+  window B with a corrupt source pointer — the same window whose extent is
+  still unproven (§6 thread 1). Not caused by the widescreen work: **bisected**
+  by rebuilding the framework with the changes stashed and running the stock
+  `game.toml` — identical signature. Boot-to-memory-card play is unaffected;
+  this is the title → file-select path only. Fix it before shipping anything
+  that a player boots into.
 - **`.pst` save states snapshot RAM, so they snapshot the render contexts too.**
   A state taken before the packet-buffer change still describes two 96,000-byte
   buffers, and the patched init (`FUN_80012598`) never runs again after a load —

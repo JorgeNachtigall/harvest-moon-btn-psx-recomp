@@ -326,7 +326,58 @@ where the two disagree. Stock 0/1740, +3 tiles 1680/1740, +4 tiles 0/1740.
 
 ---
 
-## 6. Dead and unverified paths
+## 6. The title screen — a 320-wide backdrop blit
+
+The title is not the 3D scene it looks like. Once the intro animation has
+settled, a whole frame is **~124 GP0 commands**, and every layer is 2D:
+
+| OT rank | what | prims |
+|---|---|---|
+| — | frame clear | `0x02` fill, `(0,240)` `320x240`, black |
+| 26 | **grass backdrop** | two opaque `0x64` rects: `256x240` at `(0,0)` + `64x240` at `(256,0)`, CLUT `0x7F54` |
+| 27 | scrolling overlay | 36 semi-transparent `0x66` rects, the SAME texture under CLUT `0x7F14` (a grey palette), tiled 3x3 at a 320x240 pitch and drifting a pixel a frame |
+| 28 | plants, horse, boy, dog | 14 `0x2C` quads |
+| 29 | logo + text | `0x64` `256x136` (logo, CLUT `0x7F94`), plus the `PRESS START BUTTON` / copyright strips (`160x24`, `256x24`, `144x24`) |
+
+Both ot-26 rects are one 320x240 image split at the texture-page boundary; the
+image itself is **plain grass** — decoded straight out of VRAM at `(320,256)`
+and `(512,256)` under CLUT `0x7F54`, it holds no logo, no text and no
+characters. Everything readable is a separate prim drawn on top.
+
+`PRESS START BUTTON` scrolls horizontally on purpose — catching it half off the
+frame edge is the effect, not a bug.
+
+### Why the 16:9 margins came up grey, and the fix
+
+A PS1 sprite cannot scale, so the ot-26 backdrop is authored exactly 4:3 wide
+and stops dead at `x=320`. In native-wide the reveal margins therefore got the
+black frame clear plus the ot-27 overlay — which DOES reach far past the frame
+(its tiles span `x = -561..805`) but is semi-transparent and uses the grey
+palette. Grey streaks over black, changing every frame: it looked like a colour
+bug in the mirror, and it was not. Two measurements settled it:
+
+- **Squash mode drew the same geometry green.** `ws_nw on=0` puts the wider FOV
+  inside the canonical 320-wide buffer; its edges were ordinary green grass
+  (`R11 G20 B22`-class), while native-wide margins were exactly `R=G=B`.
+  Exact greys are a palette signature, not a lighting or CLUT-loss artifact.
+- **Rasterising the frame dump found no geometry there.** Point tests in the
+  margins matched zero polygons: nothing was being mis-drawn, something was
+  simply absent.
+
+The fix is `[widescreen] nw_backdrop_rects` (framework: `psx_ws_prim_in_backdrop`
+in `gpu.c`), which stretches **full-display-height textured rects** — and only
+those — into the wide frame, mirror-side only, so canonical 4:3 VRAM is
+untouched. On the title exactly the two ot-26 rects qualify. The stretch is
+1.33x on a grass texture, so it is invisible, and because the logo, characters
+and text are separate prims they keep their authored size and position.
+
+Audited for misfires by counting `0x64`-`0x67` rects with `y <= 0 && y+h >= 240`
+per screen: gameplay 0/1530, pause menu 0/65, map screen 0/284, attract demo 0.
+Only the title matches.
+
+---
+
+## 7. Dead and unverified paths
 
 **`FUN_8001DCB0` and `FUN_8001DE4C`** are complete GTE renderers
 (`RTPT` → `FLAG` → `NCLIP` → `RTPS` → cull → emit `0x2C`), but both call
@@ -358,7 +409,7 @@ this address; it never analysed the region.
 
 ---
 
-## 7. Frame composition and the margin-colour seam — FIXED
+## 8. Frame composition and the margin-colour seam — FIXED
 
 The runtime keeps canonical PSX VRAM faithful at 4:3 — with widescreen engaged,
 `draw_area` is still `[0,240,319,479]` and `draw_offset_x` is `0`. Margin content
@@ -418,7 +469,7 @@ gradient). 4:3 is untouched by construction — the whole block is inside
 
 ---
 
-## 8. Packet buffers
+## 9. Packet buffers
 
 The game **double-buffers** its GPU packet memory, alternating between roughly
 `0x801C2000`–`0x801C7400` and `0x801D9000`–`0x801E0000`. Consecutive frames in
@@ -438,7 +489,7 @@ the specific packet you care about (`docs/METHOD.md`), never by buffer range.
 
 ---
 
-## 9. GTE instruction reference
+## 10. GTE instruction reference
 
 COP2 command instructions are `0x4A000000 | cofun`:
 

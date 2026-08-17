@@ -48,3 +48,7 @@ psx_last_run_report.json
 
 # Runtime diagnostic dumps
 starvation_dump.jsonl
+
+# Crash/freeze post-mortems the runtime drops in the working directory.
+psx_crash.txt
+psx_freeze_dump_*.json
