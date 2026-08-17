@@ -231,11 +231,17 @@ draw path** — they encode several days of dead ends.
   anything frustum-shaped. It also carries the full RAM map and the proof that
   no free block exists in the 2 MB — do not go looking again.
 - **`docs/RENDERING.md`** — the game's draw paths: which function draws the
-  ground, the sprites, the menu wallpaper; the two screen-bounds culls in the
-  3D renderer and their exact constants; the chunk frustum test; dead code to
-  avoid; packet double-buffering; GTE opcode reference.
+  ground, the sprites, the menu wallpaper, the title screen; the two
+  screen-bounds culls in the 3D renderer and their exact constants; the chunk
+  frustum test; dead code to avoid; packet double-buffering; GTE opcode
+  reference.
 - **`docs/METHOD.md`** — how to find "which function drew this pixel" in three
   steps, plus the measurement discipline. Use it first, not last.
+- **`docs/SESSION-04.md`** — the front-end widescreen work (title, memory card,
+  map screen) and the boot-path crash a size patch caused. Read it before
+  touching the reveal margins: it carries the three theories that died, why the
+  margins must be painted at the frame CLEAR and not at draw time, and the
+  per-prim gate audit method.
 
 The short version of the method, because it is the highest-value thing here:
 
@@ -369,6 +375,12 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 
 ## 6. Next threads
 
+0. **Walk boot → memory card → save → gameplay once.** The boot-path crash is
+   fixed (§5) and the card screen renders, but `build/card1.mcd` carries no
+   diary ("No loadable diary in MEMORY CARD slot 1"), so **nothing downstream of
+   the card screen has been exercised** — including whether a real save loads
+   into gameplay at all. Everything else in `docs/SESSION-04.md` was verified on
+   screen; this was not.
 1. ~~**Static overlay extraction.**~~ **Done** — see §3 and `docs/SESSION-02.md`.
    Follow-ups it left open:
    - **Mode 15 loads member 11 into window B**, unlike every other reference to
