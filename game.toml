@@ -502,6 +502,62 @@ expected    = "0x00021200"
 replacement = "0x00000000"
 note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
 
+# --- The 27th patch site, and the one that was missed: the packet-buffer
+# SAVE/RESTORE that stashes packet RAM in overlay window B. --------------------
+#
+# FUN_800128DC(mode, which) parks the primitive packet RAM in overlay window B
+# (0x8012DDE8, the constant at 0x8001009C) while a front-end overlay is loaded
+# over window A, then copies it back:
+#
+#   lw   v1, 0x11C(v0)      ; v0 = active ctx (gp+0x14C) -> packet buffer LENGTH
+#   sll  a2, v1, 1          ; <-- length * 2
+#   lw   a0, 0x130(v0/v1)   ; the packet base, 0x801C2440
+#   jal  0x80041C24         ; BIOS memcpy(dst, src, bytes)
+#
+# The doubling is the STOCK two-buffer layout: contexts A and B held 96,000
+# bytes each, contiguous at 0x801C2440..0x801F1240, so "length * 2" was exactly
+# both buffers. Sharing one 192,000-byte buffer above sets ctx+0x11C = 0x2EE00,
+# and the SAME expression now asks for 384,000 bytes out of a 192,000-byte
+# region: the restore runs from 0x801C2440 clean off the top of RAM, wraps
+# (& 0x1FFFFF) into KERNEL memory around 0x3D00-0x4010, and the next kernel
+# dispatch jumps into the wreckage:
+#
+#   DISPATCH FATAL: misaligned target 0x170DAFB3
+#     $ra 0x80012954   $v0 0x801C2440 (dst base)   $a1 0x8012DDE8 (window B)
+#     $a2 0x0005DC00 (384,000)        $a0 0x80203D8F (past the 2 MB top)
+#   dispatch_tail: ... 0x3F00 0x3F0C 0x3F18 0x3F24 0x3F30 0x4000 ... 0x29CC
+#
+# Symptom: press START at the title (mode 0x0D -> 0x08, which loads the
+# file-select overlay) and the game dies before the save screen appears.
+#
+# Fix: shift by 0 instead of 1, so the copy is ctx+0x11C bytes = 192,000 =
+# exactly the shared buffer, which occupies the same 0x801C2440..0x801F1240
+# bytes the two stock buffers did. `sll a2,v1,0` is the same instruction with
+# sa=0 (it is also the canonical encoding of `move a2,v1`), so the register
+# allocation and the delay-slot layout are untouched.
+#
+# These are the ONLY two readers of ctx+0x11C in the whole 0x4E800 text image
+# (scanned every load/store with immediate 0x11C), so nothing else carries the
+# two-buffer assumption. Both branches of the function need it: 0x80012914 is
+# the restore (window B -> packet RAM), 0x80012994 the save (packet RAM ->
+# window B); the save did not fault because window B is 483,328 bytes, but it
+# read 192,000 bytes past the buffer and wrote that garbage down for the
+# restore to hand back.
+
+[[recompiler.patch]]
+id          = "pktbuf-save-restore-len-a"
+address     = "0x80012914"
+expected    = "0x00033040"   # sll a2,v1,0x1   (length * 2 = both stock buffers)
+replacement = "0x00033000"   # sll a2,v1,0x0   (length     = the shared buffer)
+note        = "FUN_800128DC restore: copy ctx+0x11C bytes, not twice that"
+
+[[recompiler.patch]]
+id          = "pktbuf-save-restore-len-b"
+address     = "0x80012994"
+expected    = "0x00033040"   # sll a2,v1,0x1
+replacement = "0x00033000"   # sll a2,v1,0x0
+note        = "FUN_800128DC save: same length as the restore above"
+
 
 # ---------------------------------------------------------------------------
 # FRUSTUM CONE: d = +60. Fills the 16:9 edge wedges. See docs/FRUSTUM.md.
@@ -601,10 +657,10 @@ gte_game_mode = true
 #                      pause menu    mode 0x02  ->  wide  (member 11)
 #
 # The pause menu shares the gameplay mode, so gating on the mode holds the wide
-# present across it, and 0x0D does the same for the whole front-end sequence
-# (Natsume logo -> title). Every other front-end screen still gets a faithful
-# 4:3 pillarbox -- the map screen (Select) and the mode-0x08 load screen are
-# unlisted and unchanged.
+# present across it, 0x0D does the same for the whole front-end sequence
+# (Natsume logo -> title) and 0x08 for the memory-card / save-select screens.
+# Every other front-end screen still gets a faithful 4:3 pillarbox -- the map
+# screen (Select) is unlisted and unchanged.
 #
 # 0x02/0x06/0x0E/0x13/0x14 are every mode that loads member 11 -- objcg\event_s.bin,
 # the world/event overlay -- into window A, straight from seeds/overlays.json.
@@ -614,6 +670,14 @@ gte_game_mode = true
 # 0x0D is the TITLE sequence (member 27). It is listed for the widescreen title
 # (docs/RENDERING.md 6) and needs nw_backdrop_rects below to look right: without
 # it the reveal margins carry only the scrolling grey overlay layer over black.
+#
+# 0x08 is the MEMORY CARD / save-select flow (member 30, obj\gf_mcard.bin). It
+# needs nothing else: its background is the SAME 24 px tile grid the pause menu
+# uses (FUN_800223D4), already widened four tiles per side by the
+# "widescreen-ground-grid-*" patches above, so the scrolling wallpaper covers
+# the 16:9 frame the moment the present goes wide. Measured on this screen:
+# 23 columns, x = -111..417 step 24, and 23 % 4 == 3 -- the same invariant that
+# keeps the diagonal scroll wrapping seamlessly (docs/RENDERING.md 5).
 #
 # gte_game_mode above stays TRUE: the gate supersedes it for game_mode, but
 # ws_2d_only_scene() still keys off it (it returns 0 early when the GTE
@@ -629,7 +693,7 @@ gte_game_mode = true
 # gameplay_state_* need no rebuild at all, nw_backdrop_rects needs `sh build.sh`
 # (the recompiler has to learn the key), and the overlay cache stays valid.
 gameplay_state_addr   = "0x8005E39C"
-gameplay_state_values = ["0x02", "0x06", "0x0D", "0x0E", "0x13", "0x14"]
+gameplay_state_values = ["0x02", "0x06", "0x08", "0x0D", "0x0E", "0x13", "0x14"]
 
 # Fill the title screen's reveal margins ([widescreen] nw_backdrop_rects).
 #
