@@ -692,6 +692,33 @@ gte_game_mode = true
 # instruction patches only. Editing them takes effect on the next launch --
 # gameplay_state_* need no rebuild at all, nw_backdrop_rects needs `sh build.sh`
 # (the recompiler has to learn the key), and the overlay cache stays valid.
+# The MAP screen (Select) -- fill its reveal margins with the paper white.
+#
+# The map is an authored 2D screen: a black frame clear, a full-width window
+# panel (0x38 gouraud quad, 2..318 x 2..174, the game's usual cream->peach
+# window gradient), the map itself as a 24-quad textured grid covering the whole
+# 320x240, the two character markers, and the caption box. Nothing reaches the
+# 16:9 margins, so they came up black.
+#
+# Nothing here can honestly be stretched: the map is a drawn illustration (33%
+# wider would be visibly wrong, and its markers are separate quads that would
+# drift off their map positions), and the panel behind it is a BACKING layer the
+# player never sees in 4:3 -- stretching that is what put cream bars beside a
+# white map. What continues past the frame, visually, is the map's own paper:
+# the art fades to white cloud at both edges (measured: canonical x 0..8 is pure
+# white on every scanline sampled). So paint the margins white.
+#
+# nw_backdrop detects the panel (full display width, axis-aligned, >= 64 tall)
+# and nw_backdrop_fill turns that detection into a margin FILL instead of a
+# stretch. The pairing is what scopes it: this is the only full-width backdrop
+# quad the game draws. Audited elsewhere -- the title composes from textured
+# RECTS, the pause/memory-card wallpaper is a rect grid, and dialog boxes fail
+# the edge test (28..291 of 320), so none of them trigger it. The fill also runs
+# at the panel's place in the draw order, so a screen that DOES paint its own
+# margins later (the title's grass, the wallpaper grid) still covers it.
+nw_backdrop      = true
+nw_backdrop_fill = "0xFFFFFF"
+
 gameplay_state_addr   = "0x8005E39C"
 gameplay_state_values = ["0x02", "0x06", "0x08", "0x0D", "0x0E", "0x13", "0x14"]
 
