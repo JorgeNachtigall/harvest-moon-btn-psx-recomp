@@ -231,11 +231,17 @@ draw path** — they encode several days of dead ends.
   anything frustum-shaped. It also carries the full RAM map and the proof that
   no free block exists in the 2 MB — do not go looking again.
 - **`docs/RENDERING.md`** — the game's draw paths: which function draws the
-  ground, the sprites, the menu wallpaper; the two screen-bounds culls in the
-  3D renderer and their exact constants; the chunk frustum test; dead code to
-  avoid; packet double-buffering; GTE opcode reference.
+  ground, the sprites, the menu wallpaper, the title screen; the two
+  screen-bounds culls in the 3D renderer and their exact constants; the chunk
+  frustum test; dead code to avoid; packet double-buffering; GTE opcode
+  reference.
 - **`docs/METHOD.md`** — how to find "which function drew this pixel" in three
   steps, plus the measurement discipline. Use it first, not last.
+- **`docs/SESSION-04.md`** — the front-end widescreen work (title, memory card,
+  map screen) and the boot-path crash a size patch caused. Read it before
+  touching the reveal margins: it carries the three theories that died, why the
+  margins must be painted at the frame CLEAR and not at draw time, and the
+  per-prim gate audit method.
 
 The short version of the method, because it is the highest-value thing here:
 
@@ -303,9 +309,13 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 | Overlay funcs registered / regions | 51 / 5 |
 | `dispatch_interp_fallback` at title | 75,160 → **615** after static extraction |
 | Native widescreen (16:9) | **working** — 426×240, real FOV; edge wedges fixed by widening the frustum cone to **`d = 8`** (`docs/FRUSTUM.md`), chosen on screen as the smallest value that closes them. 29.97 game FPS at both `d = 0` and `d = 8` on the graveyard save; `d = 40` drops it to 19.89 (branch `feat/native-widescreen`) |
-| Widescreen stays on in the PAUSE MENU | **fixed** — `gte_game_mode` alone classifies gameplay by GTE vertex count and gives up 45 frames after the last 3D frame, so any long full-2D screen pillarboxed back to 4:3 (and silently wasted the menu-wallpaper widening). `[widescreen] gameplay_state_addr/values` now gates on the game's own mode word at `0x8005E39C`: **`0x0D` title → 4:3, `0x02` gameplay AND pause menu → wide.** Values = every mode loading member 11 into window A. The RAM gate supersedes the GTE heuristic entirely (`gpu.c:ws_game_mode`) |
+| Widescreen stays on in the PAUSE MENU | **fixed** — `gte_game_mode` alone classifies gameplay by GTE vertex count and gives up 45 frames after the last 3D frame, so any long full-2D screen pillarboxed back to 4:3 (and silently wasted the menu-wallpaper widening). `[widescreen] gameplay_state_addr/values` now gates on the game's own mode word at `0x8005E39C`: **`0x02` gameplay AND pause menu → wide, `0x0D` title → wide (see the next row), everything else → 4:3.** Values = every mode loading member 11 into window A, plus `0x0D`. The RAM gate supersedes the GTE heuristic entirely (`gpu.c:ws_game_mode`) |
+| Boot path: title → memory card → save | **working** — pressing Start at the title used to kill the guest (`DISPATCH FATAL`, §5); the packet-buffer save/restore was copying twice the shared buffer's size into it. Fixed by `pktbuf-save-restore-len-a/b` in `game.toml` |
+| MAP screen (Select) in 16:9 | **working** — an authored 2D screen: black clear, a full-width window panel, the map as a 24-quad textured grid over the whole 320×240, markers, caption box. Nothing reached the margins, so they were black. Nothing there can honestly be stretched (the map is an illustration and its markers are separate quads that would drift), so the new `[widescreen] nw_backdrop_fill = "0xFFFFFF"` PAINTS the margins in the map's own paper white — measured: canonical x 0..8 is pure white on every scanline sampled. **Two rules scope it, both learned by getting them wrong:** the panel must be FULL-BLEED (within 8 px of both edges — the pause menu's panel is inset at 18..302 and came up white under the stretch detector's 24 px slack), and the fill is painted at the FRAME CLEAR, not when the panel is drawn (the pause menu draws its wallpaper *before* its panel, so painting at panel time erased it). `nw_backdrop` (the stretch) stays OFF — this game's full-width quads are window panels |
+| MEMORY CARD / save-select in 16:9 | **working** — mode `0x08` added to `gameplay_state_values`; nothing else needed. Its wallpaper is the same `FUN_800223D4` 24 px grid as the pause menu, already widened 4 tiles/side, so it fills the frame and keeps the seamless diagonal scroll (measured on this screen: 23 columns, x = −111..417 step 24, 23 % 4 == 3) |
+| TITLE SCREEN in 16:9 | **working** — `0x0D` added to `gameplay_state_values`, plus `[widescreen] nw_backdrop_rects`. The title is all 2D (~124 GP0 cmds/frame): its grass field is a 320×240 image blitted as two opaque `0x64` rects at OT 26, and a sprite cannot scale, so the reveal margins showed only the semi-transparent scrolling overlay (same texture, grey CLUT `0x7F14`) over the black clear — the "grey streaks". The new flag stretches full-display-height textured rects, mirror-side only, so the grass fills the frame while the logo, characters and the scrolling PRESS START BUTTON keep their authored size. Audited: gate matches 0 rects in gameplay/pause/map/demo. `docs/RENDERING.md` §6 |
 | Pause-menu wallpaper scroll wraps seamlessly | **fixed** — the tiled background drifts diagonally by `s3 = (frames/4) % 24` and snaps back every 24 px; the snap is invisible only if the 4-variant tile pattern survives a one-tile diagonal shift, which requires **columns per row ≡ 3 (mod 4)**. Stock is 15 ✅; widening by 3 tiles/side made it 21 ✗ and the "endless" scroll visibly reset every ~3.2 s. Now widened by **4** tiles/side → 23 ✅, and since 4 ≡ 0 (mod 4) the 4:3 centre is also phase-identical to stock. **The grid may only ever be widened in whole multiples of 4 tiles per side.** `docs/RENDERING.md` §5 |
-| Full-screen tint vs the 16:9 margins | **fixed** in the framework — the margins used to render a different colour from the 4:3 centre (ΔG −24, ΔB −40, ΔR 0). `docs/RENDERING.md` §7 |
+| Full-screen tint vs the 16:9 margins | **fixed** in the framework — the margins used to render a different colour from the 4:3 centre (ΔG −24, ΔB −40, ΔR 0). `docs/RENDERING.md` §8 |
 | Frustum `d` is NOT free | it buys geometry with frame rate, and the cost is invisible in light scenes. Tune live with `python3 tools/frustum_d.py` (needs a build with the two cone patches removed), **in the heaviest area you can reach**. The game also rewrites the angle RAM back to stock on its own — the tool holds the value; what performs that rewrite is still unidentified |
 | Game frame rate vs VSYNC | **they are different numbers and the OSD shows both.** The runtime presents at every simulated vblank, so the present cadence is pinned at 60 Hz regardless of what the game does. The rate a player perceives is the display-area flip rate (GP1(05h) changing), counted in `gpu.c:gp1_display_area_start`. This game runs at **30 FPS** in town and was measured at **20 FPS** (3 vblanks/frame) in a denser area, at BOTH `d = 0` and `d = 60`. `frame_perf` reports `game_fps`, `vsync_hz`, `game_frames` |
 | Primitive packet buffer | **192,000 B**, shared by both render contexts instead of 2 × 96,000 double-buffered — linked-list DMA is synchronous here (`runtime/src/dma.c:700`), so the second buffer bought nothing. This is what makes `d = 60` safe: 104.7% occupancy → 52.4%. Rationale + the 26 patches: `game.toml`, "PACKET BUFFER" |
@@ -318,6 +328,20 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 
 ## 5. Known issues and traps
 
+- **A `[[recompiler.patch]]` that changes a SIZE can break code you never
+  looked at.** The packet-buffer patch (96,000 → 192,000, §4) set `ctx+0x11C`,
+  and `FUN_800128DC` — the routine that parks packet RAM in overlay window B
+  while a front-end overlay loads — copies `ctx[0x11C] << 1` bytes, because
+  stock had TWO contiguous 96,000-byte buffers. With one shared 192,000-byte
+  buffer that became a 384,000-byte copy into a 192,000-byte region: it ran off
+  the top of RAM, wrapped (`& 0x1FFFFF`) into **kernel code** at `0x3D00-0x4010`
+  and the next kernel dispatch jumped into the wreckage —
+  `DISPATCH FATAL: misaligned target 0x170DAFB3`. Symptom: press Start at the
+  title and the game died before the memory-card screen. **Fixed** by the
+  `pktbuf-save-restore-len-*` patches (`sll a2,v1,1` → `sll a2,v1,0`); those two
+  sites are the ONLY readers of `ctx+0x11C` in the whole text image. The lesson:
+  after changing a size constant, scan for every *reader* of the field, not just
+  the writers — `<< 1` on a length is a layout assumption in disguise.
 - **`.pst` save states snapshot RAM, so they snapshot the render contexts too.**
   A state taken before the packet-buffer change still describes two 96,000-byte
   buffers, and the patched init (`FUN_80012598`) never runs again after a load —
@@ -351,6 +375,12 @@ Refresh seeds (Ghidra project must be **closed** — it holds an exclusive lock)
 
 ## 6. Next threads
 
+0. **Walk boot → memory card → save → gameplay once.** The boot-path crash is
+   fixed (§5) and the card screen renders, but `build/card1.mcd` carries no
+   diary ("No loadable diary in MEMORY CARD slot 1"), so **nothing downstream of
+   the card screen has been exercised** — including whether a real save loads
+   into gameplay at all. Everything else in `docs/SESSION-04.md` was verified on
+   screen; this was not.
 1. ~~**Static overlay extraction.**~~ **Done** — see §3 and `docs/SESSION-02.md`.
    Follow-ups it left open:
    - **Mode 15 loads member 11 into window B**, unlike every other reference to

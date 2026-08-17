@@ -502,6 +502,62 @@ expected    = "0x00021200"
 replacement = "0x00000000"
 note        = "ctx+0x124 base: i*96000 + 0x4290 -> 0x4290 (nop)"
 
+# --- The 27th patch site, and the one that was missed: the packet-buffer
+# SAVE/RESTORE that stashes packet RAM in overlay window B. --------------------
+#
+# FUN_800128DC(mode, which) parks the primitive packet RAM in overlay window B
+# (0x8012DDE8, the constant at 0x8001009C) while a front-end overlay is loaded
+# over window A, then copies it back:
+#
+#   lw   v1, 0x11C(v0)      ; v0 = active ctx (gp+0x14C) -> packet buffer LENGTH
+#   sll  a2, v1, 1          ; <-- length * 2
+#   lw   a0, 0x130(v0/v1)   ; the packet base, 0x801C2440
+#   jal  0x80041C24         ; BIOS memcpy(dst, src, bytes)
+#
+# The doubling is the STOCK two-buffer layout: contexts A and B held 96,000
+# bytes each, contiguous at 0x801C2440..0x801F1240, so "length * 2" was exactly
+# both buffers. Sharing one 192,000-byte buffer above sets ctx+0x11C = 0x2EE00,
+# and the SAME expression now asks for 384,000 bytes out of a 192,000-byte
+# region: the restore runs from 0x801C2440 clean off the top of RAM, wraps
+# (& 0x1FFFFF) into KERNEL memory around 0x3D00-0x4010, and the next kernel
+# dispatch jumps into the wreckage:
+#
+#   DISPATCH FATAL: misaligned target 0x170DAFB3
+#     $ra 0x80012954   $v0 0x801C2440 (dst base)   $a1 0x8012DDE8 (window B)
+#     $a2 0x0005DC00 (384,000)        $a0 0x80203D8F (past the 2 MB top)
+#   dispatch_tail: ... 0x3F00 0x3F0C 0x3F18 0x3F24 0x3F30 0x4000 ... 0x29CC
+#
+# Symptom: press START at the title (mode 0x0D -> 0x08, which loads the
+# file-select overlay) and the game dies before the save screen appears.
+#
+# Fix: shift by 0 instead of 1, so the copy is ctx+0x11C bytes = 192,000 =
+# exactly the shared buffer, which occupies the same 0x801C2440..0x801F1240
+# bytes the two stock buffers did. `sll a2,v1,0` is the same instruction with
+# sa=0 (it is also the canonical encoding of `move a2,v1`), so the register
+# allocation and the delay-slot layout are untouched.
+#
+# These are the ONLY two readers of ctx+0x11C in the whole 0x4E800 text image
+# (scanned every load/store with immediate 0x11C), so nothing else carries the
+# two-buffer assumption. Both branches of the function need it: 0x80012914 is
+# the restore (window B -> packet RAM), 0x80012994 the save (packet RAM ->
+# window B); the save did not fault because window B is 483,328 bytes, but it
+# read 192,000 bytes past the buffer and wrote that garbage down for the
+# restore to hand back.
+
+[[recompiler.patch]]
+id          = "pktbuf-save-restore-len-a"
+address     = "0x80012914"
+expected    = "0x00033040"   # sll a2,v1,0x1   (length * 2 = both stock buffers)
+replacement = "0x00033000"   # sll a2,v1,0x0   (length     = the shared buffer)
+note        = "FUN_800128DC restore: copy ctx+0x11C bytes, not twice that"
+
+[[recompiler.patch]]
+id          = "pktbuf-save-restore-len-b"
+address     = "0x80012994"
+expected    = "0x00033040"   # sll a2,v1,0x1
+replacement = "0x00033000"   # sll a2,v1,0x0
+note        = "FUN_800128DC save: same length as the restore above"
+
 
 # ---------------------------------------------------------------------------
 # FRUSTUM CONE: d = +60. Fills the 16:9 edge wedges. See docs/FRUSTUM.md.
@@ -596,29 +652,112 @@ gte_game_mode = true
 # the gate reads with psx_read_word -- verified, the three bytes above it are
 # zero.
 #
-# Measured:            title screen  mode 0x0D  ->  4:3   (member 27)
+# Measured:            title screen  mode 0x0D  ->  wide  (member 27)
 #                      gameplay      mode 0x02  ->  wide  (member 11)
 #                      pause menu    mode 0x02  ->  wide  (member 11)
 #
 # The pause menu shares the gameplay mode, so gating on the mode holds the wide
-# present across it while the title and the other front-end screens still get a
-# faithful 4:3 pillarbox.
+# present across it, 0x0D does the same for the whole front-end sequence
+# (Natsume logo -> title) and 0x08 for the memory-card / save-select screens.
+# Every other front-end screen still gets a faithful 4:3 pillarbox -- the map
+# screen (Select) is unlisted and unchanged.
 #
-# The value list is every mode that loads member 11 -- objcg\event_s.bin, the
-# world/event overlay -- into window A, straight from seeds/overlays.json.
+# 0x02/0x06/0x0E/0x13/0x14 are every mode that loads member 11 -- objcg\event_s.bin,
+# the world/event overlay -- into window A, straight from seeds/overlays.json.
 # Mode 15 also maps to member 11 but loads it into window B and is marked
 # `unverified` there, so it is deliberately NOT listed.
+#
+# 0x0D is the TITLE sequence (member 27). It is listed for the widescreen title
+# (docs/RENDERING.md 6) and needs nw_backdrop_rects below to look right: without
+# it the reveal margins carry only the scrolling grey overlay layer over black.
+#
+# 0x08 is the MEMORY CARD / save-select flow (member 30, obj\gf_mcard.bin). It
+# needs nothing else: its background is the SAME 24 px tile grid the pause menu
+# uses (FUN_800223D4), already widened four tiles per side by the
+# "widescreen-ground-grid-*" patches above, so the scrolling wallpaper covers
+# the 16:9 frame the moment the present goes wide. Measured on this screen:
+# 23 columns, x = -111..417 step 24, and 23 % 4 == 3 -- the same invariant that
+# keeps the diagonal scroll wrapping seamlessly (docs/RENDERING.md 5).
 #
 # gte_game_mode above stays TRUE: the gate supersedes it for game_mode, but
 # ws_2d_only_scene() still keys off it (it returns 0 early when the GTE
 # detector is configured), and without that a 2D-only scene would pillarbox
 # through the other branch of gpu_ws_present_native_43.
 #
-# NOTE: this is a [widescreen] key, so it is part of the overlay codegen config
-# hash. After editing, rerun the full three-step regen or the overlay cache is
-# orphaned and everything falls back to the interpreter, silently. See CLAUDE.md.
+# NOTE: [widescreen] keys that name CULL SITES or PATCHES are part of the overlay
+# codegen config hash -- editing those without the full three-step regen orphans
+# the cache and drops everything to the interpreter, silently (see CLAUDE.md).
+# These three are NOT hashed: overlay_codegen_config_hash (config_loader.cpp:55)
+# covers the cull-site lists, the flags block, the aspect cone and the
+# instruction patches only. Editing them takes effect on the next launch --
+# gameplay_state_* need no rebuild at all, nw_backdrop_rects needs `sh build.sh`
+# (the recompiler has to learn the key), and the overlay cache stays valid.
+# The MAP screen (Select) -- fill its reveal margins with the paper white.
+#
+# The map is an authored 2D screen: a black frame clear, a full-width window
+# panel (0x38 gouraud quad, 2..318 x 2..174, the game's usual cream->peach
+# window gradient), the map itself as a 24-quad textured grid covering the whole
+# 320x240, the two character markers, and the caption box. Nothing reaches the
+# 16:9 margins, so they came up black.
+#
+# Nothing here can honestly be stretched: the map is a drawn illustration (33%
+# wider would be visibly wrong, and its markers are separate quads that would
+# drift off their map positions), and the panel behind it is a BACKING layer the
+# player never sees in 4:3 -- stretching that is what put cream bars beside a
+# white map. What continues past the frame, visually, is the map's own paper:
+# the art fades to white cloud at both edges (measured: canonical x 0..8 is pure
+# white on every scanline sampled). So paint the margins white.
+#
+# nw_backdrop_fill detects that panel and paints the margins. TWO rules keep it
+# off the screens it would wreck -- both learned by wrecking them:
+#
+#  1. FULL-BLEED ONLY (within 8 px of both frame edges). The first cut reused
+#     the stretch detector's 24 px slack, which also matched the PAUSE MENU's
+#     window panel at x 18..302 -- and the diary/pause screens came up white.
+#     The map's panel is x 2..318; a window panel is inset. That is the whole
+#     difference and it is why the tolerance is tight.
+#  2. PAINTED AT THE FRAME CLEAR, not when the panel is drawn. The pause menu
+#     draws its wallpaper grid (OT 34) BEFORE its panel (OT 35), so painting at
+#     panel time erased wallpaper the widened grid had just put in the margins.
+#     Detection now arms a latch and gp0_exec_fill_rect paints the margins when
+#     the game clears its framebuffer, underneath everything -- so any screen
+#     that paints its own margins (title grass, wallpaper) simply covers it.
+#
+# Verified against the save states: slot 0 (map) white margins, slot 1 (diary /
+# pause) full wallpaper pattern and an un-widened panel, gameplay untouched,
+# title still grass.
+# nw_backdrop (the STRETCH) stays OFF: this game's full-width quads are window
+# panels, and widening those just makes boxes wider than their text. The fill
+# below is what we want, and it takes precedence over the stretch anyway.
+nw_backdrop      = false
+nw_backdrop_fill = "0xFFFFFF"
+
 gameplay_state_addr   = "0x8005E39C"
-gameplay_state_values = ["0x02", "0x06", "0x0E", "0x13", "0x14"]
+gameplay_state_values = ["0x02", "0x06", "0x08", "0x0D", "0x0E", "0x13", "0x14"]
+
+# Fill the title screen's reveal margins ([widescreen] nw_backdrop_rects).
+#
+# The title paints its grass field as TWO opaque textured rects -- 256x240 at
+# (0,0) plus 64x240 at (256,0), one per texture page, CLUT 0x7F54 -- i.e. a
+# 320x240 image blitted at the frame origin. A PS1 sprite cannot scale, so that
+# layer is exactly 4:3 wide and stops dead at x=320; in native-wide the margins
+# were left showing only the scrolling semi-transparent overlay (the SAME image
+# under the grey CLUT 0x7F14, tiled 3x3 and drifting) over the black frame clear.
+# That is what the grey streaky bands on either side of the logo were.
+#
+# The flag stretches full-display-height textured rects -- and only those -- into
+# the wide frame, in the mirror only, so canonical 4:3 VRAM is untouched. On the
+# title exactly two prims per frame qualify (verified by frame dump), and the
+# stretch is invisible because the image is plain grass: no logo, no text, no
+# characters are in it (they are separate prims at OT ranks 28/29, drawn at their
+# authored size and position, which is why the logo and the scrolling PRESS START
+# BUTTON stay pixel-correct).
+#
+# Audited for misfires by dumping every 0x64-0x67 rect on each screen and
+# counting those with y <= 0 and y+h >= 240: gameplay 0/1530, pause menu 0/65,
+# map screen 0/284, attract demo 0/hundreds. Only the title matches. 4:3 is
+# unaffected by construction -- the gate is behind g_wide_w > 0.
+nw_backdrop_rects = true
 
 [widescreen.cull]
 # ---------------------------------------------------------------------------
